@@ -66,4 +66,4 @@ async function run(): Promise<void> {
   }
 }
 
-run().then(() => process.exit(0)).catch(() => process.exit(1));
+run().then(() => process.exit(process.exitCode ?? 0)).catch(() => process.exit(1));
