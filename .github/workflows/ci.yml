@@ -20,6 +20,8 @@ jobs:
       sonarqube_enabled:   ${{ steps.cfg.outputs.sonarqube_enabled }}
       trivy_enabled:       ${{ steps.cfg.outputs.trivy_enabled }}
       checkov_enabled:     ${{ steps.cfg.outputs.checkov_enabled }}
+      checkov_tf_enabled:  ${{ steps.cfg.outputs.checkov_tf_enabled }}
+      plan_enabled:        ${{ steps.cfg.outputs.plan_enabled }}
       publish_enabled:     ${{ steps.cfg.outputs.publish_enabled }}
       ActionsCoreLib_type: ${{ steps.cfg.outputs.ActionsCoreLib_type }}
     steps:
@@ -28,6 +30,41 @@ jobs:
         uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: config
+
+  # ── Terraform ─────────────────────────────────────────────────────────────
+
+  plan:
+    name: Plan
+    needs: config
+    if: needs.config.outputs.plan_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Setup Terragrunt
+        uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: setup-terragrunt
+      - name: Plan
+        uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: plan
+
+  checkov_tf:
+    name: Checkov Terraform
+    needs: [config, plan]
+    if: |
+      always() &&
+      needs.config.outputs.checkov_tf_enabled == 'true' &&
+      needs.plan.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: checkov_tf
+
+  # ── App / Library ──────────────────────────────────────────────────────────
 
   compile:
     name: Compile
