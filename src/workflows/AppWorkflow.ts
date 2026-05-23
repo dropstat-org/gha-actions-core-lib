@@ -11,6 +11,7 @@ const BUILD_STAGES: StageSlot[] = [
   { name: StageName.SONARQUBE, required: false },
   { name: StageName.CHECKOV,   required: false },
   { name: StageName.PUBLISH,   required: false },
+  { name: StageName.TRIVY,     required: false },
 ];
 
 const PROMOTE_STAGES: StageSlot[] = [
