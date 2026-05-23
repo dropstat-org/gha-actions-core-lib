@@ -1,0 +1,22 @@
+export declare enum StageName {
+    CONFIG = "config",
+    COMPILE = "compile",
+    UNIT_TEST = "unit_test",
+    LINTER = "linter",
+    SEMGREP = "semgrep",
+    SONARQUBE = "sonarqube",
+    TRIVY = "trivy",
+    CHECKOV = "checkov",
+    CHECKOV_TF = "checkov_tf",
+    PLAN = "plan",
+    PUBLISH = "publish",
+    DEPLOY = "deploy",
+    PRE_DEPLOY = "pre_deploy",
+    POST_DEPLOY = "post_deploy",
+    RELEASE = "release",
+    VALIDATE_APPROVER = "validate-approver",
+    VALIDATE_CONFIRM = "validate-confirm",
+    SETUP_TERRAGRUNT = "setup-terragrunt",
+    GENERIC = "generic"
+}
+//# sourceMappingURL=StageName.d.ts.map

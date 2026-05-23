@@ -1,0 +1,118 @@
+﻿name: Deploy App
+
+# Deploy manual de aplicación con aprobación.
+# La promoción de imagen ECR ya ocurrió automáticamente en ActionsCoreLib-app.yml
+# (develop → dev, release/* → qa, master → prod).
+# Este workflow realiza el deploy efectivo en la plataforma (ECS / EKS / API GW).
+#
+# Disparar desde UI: Actions → Deploy App → Run workflow
+# Disparar desde CLI:
+#   gh workflow run deploy-app.yml \
+#     -f image_tag=sha-4f9c21a \
+#     -f environment=prod \
+#     -f target=ecs \
+#     -f confirm=deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag de imagen (ej: sha-4f9c21a  o  v1.4.2-sha-4f9c21a)"
+        required: true
+        type: string
+      environment:
+        description: "Ambiente destino"
+        required: true
+        type: choice
+        options: [dev, qa, prod]
+      target:
+        description: "Plataforma de deploy"
+        required: true
+        type: choice
+        options: [ecs, eks, apigw]
+      confirm:
+        description: 'Escribir "deploy" para confirmar'
+        required: true
+        type: string
+
+jobs:
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    outputs:
+      approver_teams:        ${{ steps.cfg.outputs.deploy_approver_teams }}
+      approver_users:        ${{ steps.cfg.outputs.deploy_approver_users }}
+      deploy_min_permission: ${{ steps.cfg.outputs.deploy_min_permission }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: config
+
+  validate:
+    name: Validate approval
+    needs: config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check confirmation
+        uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: validate-confirm
+        env:
+          CONFIRM:     ${{ inputs.confirm }}
+          ENVIRONMENT: ${{ inputs.environment }}
+
+      - name: Check approver
+        uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: validate-approver
+        env:
+          GH_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          ORG_READ_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
+          ACTOR:          ${{ github.actor }}
+          ORG:            ${{ github.repository_owner }}
+          REPO:           ${{ github.repository }}
+          APPROVER_TEAMS: ${{ needs.config.outputs.approver_teams }}
+          APPROVER_USERS: ${{ needs.config.outputs.approver_users }}
+          MIN_PERMISSION: ${{ needs.config.outputs.deploy_min_permission }}
+
+  deploy:
+    name: Deploy ${{ inputs.image_tag }} → ${{ inputs.environment }} (${{ inputs.target }})
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pre-deploy
+        uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: pre_deploy
+        env:
+          IMAGE_TAG:     ${{ inputs.image_tag }}
+          DEPLOY_ENV:    ${{ inputs.environment }}
+          DEPLOY_TARGET: ${{ inputs.target }}
+
+      - name: Deploy
+        uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: deploy
+        env:
+          IMAGE_TAG:             ${{ inputs.image_tag }}
+          DEPLOY_ENV:            ${{ inputs.environment }}
+          DEPLOY_TARGET:         ${{ inputs.target }}
+          AWS_ACCOUNT_ID:        ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION:            ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Post-deploy
+        uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: post_deploy
+        env:
+          DEPLOY_ENV:    ${{ inputs.environment }}
+          DEPLOY_TARGET: ${{ inputs.target }}

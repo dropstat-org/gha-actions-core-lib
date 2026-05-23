@@ -1,0 +1,66 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.AbstractDeployStage = void 0;
+const core = __importStar(require("@actions/core"));
+const AbstractBranchStage_1 = require("../base/AbstractBranchStage");
+const Environment_1 = require("../../enums/Environment");
+const ActionYaml_1 = require("../../entities/ActionYaml");
+const ErrorCode_1 = require("../../enums/ErrorCode");
+const AccountValidator_1 = require("../../utils/AccountValidator");
+class AbstractDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
+    resolveDeployEnvironment(stage) {
+        const envValue = stage.deploy?.environment ?? this.environment;
+        const validEnvs = Object.values(Environment_1.Environment);
+        if (!validEnvs.includes(envValue)) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.INVALID_DEPLOY_ENV, `Invalid deploy environment '${envValue}'. Valid: ${validEnvs.join(', ')}`);
+        }
+        return envValue;
+    }
+    setDeployEnvVars(env) {
+        core.exportVariable('DEPLOY_ENV', env);
+        core.info(`Deploying to environment: ${env}`);
+    }
+    async onDefault(stage) {
+        const env = this.resolveDeployEnvironment(stage);
+        (0, AccountValidator_1.validateDeployForBranch)(env, this.branchType, stage.deploy?.accounts);
+        this.setDeployEnvVars(env);
+        if (stage.commands && stage.commands.length > 0) {
+            await this.execCommands(stage.commands, this._effectiveTools(stage));
+        }
+    }
+}
+exports.AbstractDeployStage = AbstractDeployStage;
+//# sourceMappingURL=AbstractDeployStage.js.map

@@ -1,0 +1,1 @@
+{"version":3,"file":"ApprovalValidator.d.ts","sourceRoot":"","sources":["../../../src/stages/validate/ApprovalValidator.ts"],"names":[],"mappings":"AACA,OAAO,EAAE,eAAe,EAAE,eAAe,EAAE,MAAM,mBAAmB,CAAC;AAIrE,qBAAa,iBAAiB;IAChB,OAAO,CAAC,QAAQ,CAAC,QAAQ;gBAAR,QAAQ,EAAE,eAAe,EAAE;IAElD,QAAQ,CAAC,OAAO,EAAE,eAAe,GAAG,OAAO,CAAC,IAAI,CAAC;CAUxD"}

@@ -1,0 +1,217 @@
+﻿name: ActionsCoreLib App
+
+# Push en cualquier rama + PRs hacia develop / master.
+# Los jobs que corren en cada rama los controla ActionsCoreLib vía los flags *_enabled:
+#
+#   feature/* / hotfix/*           → build (compile → unit_test → linter → semgrep
+#                                            → sonarqube → checkov → publish)
+#   hotfix/emergency/*             → mismo que hotfix, stages skipeables desde platform-config
+#   pull_request (→ develop/master)→ trivy image scan (gate de merge)
+#   develop                        → trivy + release (promote sha-XXXX → dev)
+#   release/*                      → trivy + release (promote sha-XXXX → qa)
+#   master / main                  → trivy + release (promote sha-XXXX → prod + git tag)
+#
+# Tags ECR resultantes:
+#   myapp:sha-4f9c21a        → inmutable, construida una sola vez en feature/*
+#   myapp:v1.4.2-sha-4f9c21a → mismo digest (trazabilidad commit ↔ versión)
+#   myapp:dev | qa | prod    → tag mutable de ambiente, siempre mismo digest
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [develop, master, main]
+
+jobs:
+
+  # ── Config ──────────────────────────────────────────────────────────────────
+  # Detecta el branch type y emite flags por stage.
+  # En cada branch solo los stages permitidos emiten enabled=true.
+
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    outputs:
+      compile_enabled:    ${{ steps.ActionsCoreLib.outputs.compile_enabled }}
+      unit_test_enabled:  ${{ steps.ActionsCoreLib.outputs.unit_test_enabled }}
+      linter_enabled:     ${{ steps.ActionsCoreLib.outputs.linter_enabled }}
+      semgrep_enabled:    ${{ steps.ActionsCoreLib.outputs.semgrep_enabled }}
+      sonarqube_enabled:  ${{ steps.ActionsCoreLib.outputs.sonarqube_enabled }}
+      checkov_enabled:    ${{ steps.ActionsCoreLib.outputs.checkov_enabled }}
+      publish_enabled:    ${{ steps.ActionsCoreLib.outputs.publish_enabled }}
+      trivy_enabled:      ${{ steps.ActionsCoreLib.outputs.trivy_enabled }}
+      release_enabled:    ${{ steps.ActionsCoreLib.outputs.release_enabled }}
+      ActionsCoreLib_type:       ${{ steps.ActionsCoreLib.outputs.ActionsCoreLib_type }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ActionsCoreLib
+        uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: config
+
+  # ── Build phase ─────────────────────────────────────────────────────────────
+  # Solo corre en feature/* y hotfix/* (OutputWriter emite enabled=false en el resto).
+  # La imagen se construye UNA SOLA VEZ aquí y se promueve sin rebuild en los
+  # stages siguientes.
+
+  compile:
+    name: Compile
+    needs: config
+    if: needs.config.outputs.compile_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: compile
+
+  unit_test:
+    name: Unit Test
+    needs: [config, compile]
+    if: needs.config.outputs.unit_test_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: unit_test
+
+  linter:
+    name: Linter
+    needs: [config, compile]
+    if: needs.config.outputs.linter_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: linter
+
+  sonarqube:
+    name: SonarQube
+    needs: [config, unit_test]
+    if: needs.config.outputs.sonarqube_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: sonarqube
+        env:
+          SONAR_TOKEN:    ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  semgrep:
+    name: Semgrep
+    needs: [config, compile]
+    if: needs.config.outputs.semgrep_enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: semgrep
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  checkov:
+    name: Checkov
+    needs: [config, compile]
+    if: needs.config.outputs.checkov_enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: checkov
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    name: Publish
+    needs: [config, compile, unit_test]
+    if: needs.config.outputs.publish_enabled == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag:     ${{ steps.ActionsCoreLib.outputs.image_tag }}      # sha-4f9c21a
+      image_version: ${{ steps.ActionsCoreLib.outputs.image_version }}  # v1.4.2-sha-4f9c21a
+      image_ref:     ${{ steps.ActionsCoreLib.outputs.image_ref }}      # full ECR URL
+    steps:
+      - uses: actions/checkout@v4
+      - id: ActionsCoreLib
+        uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: publish
+        env:
+          AWS_ACCOUNT_ID:        ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION:            ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  # ── Security gate + promote phase ───────────────────────────────────────────
+  # trivy_enabled = true en PR   → escanea imagen del feature branch (gate de merge)
+  # trivy_enabled = true en dev/release/master → escanea antes de promover
+  #
+  # IMAGE_SHA en PR events: github.event.pull_request.head.sha = tip del feature branch
+  # IMAGE_SHA en push events: vacío → resolveImageSHA() detecta segundo padre del merge commit
+
+  trivy:
+    name: Trivy
+    needs: config
+    if: needs.config.outputs.trivy_enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # resolveImageSHA() necesita historial para el segundo padre
+      - uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: trivy
+        env:
+          GH_TOKEN:              ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_SHA:             ${{ github.event.pull_request.head.sha }}
+          AWS_ACCOUNT_ID:        ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION:            ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  # Promueve la imagen al tag de ambiente sin rebuild (aws ecr put-image).
+  # develop  → myapp:dev
+  # release/ → myapp:qa
+  # master   → myapp:prod  +  git tag v1.4.2-sha-4f9c21a
+  #
+  # No corre en PR ni en feature/hotfix (release_enabled=false en esas ramas).
+  # No corre si trivy falló.
+
+  release:
+    name: Release
+    needs: [config, trivy]
+    if: |
+      needs.config.outputs.release_enabled == 'true' &&
+      needs.trivy.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dropstat/ActionsCoreLib@main
+        with:
+          stage: release
+        env:
+          IMAGE_SHA:             ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCOUNT_ID:        ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION:            ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

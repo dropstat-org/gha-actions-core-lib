@@ -1,0 +1,62 @@
+﻿name: 'dropstat ActionsCoreLib'
+description: 'dropstat ActionsCoreLib — valida action.yaml y ejecuta stages'
+author: 'dropstat'
+
+inputs:
+  stage:
+    description: 'Stage a ejecutar (config | compile | unit_test | linter | sonarqube | trivy | checkov | publish | deploy | pre_deploy | post_deploy | deploy_opa | generic)'
+    required: true
+  config:
+    description: 'Ruta al archivo action.yaml del repositorio'
+    required: false
+    default: 'action.yaml'
+  platform-config-repo:
+    description: 'Nombre del repositorio de configuración dentro de la organización. Por defecto usa GITHUB_REPOSITORY_OWNER como org y platform-config como repo.'
+    required: false
+    default: 'platform-config'
+
+outputs:
+  compile_enabled:
+    description: 'true si el stage compile está habilitado'
+  unit_test_enabled:
+    description: 'true si el stage unit_test está habilitado'
+  linter_enabled:
+    description: 'true si el stage linter está habilitado'
+  sonarqube_enabled:
+    description: 'true si el stage sonarqube está habilitado'
+  trivy_enabled:
+    description: 'true si el stage trivy está habilitado'
+  checkov_enabled:
+    description: 'true si el stage checkov está habilitado'
+  publish_enabled:
+    description: 'true si el stage publish está habilitado'
+  deploy_enabled:
+    description: 'true si el stage deploy está habilitado'
+  pre_deploy_enabled:
+    description: 'true si el stage pre_deploy está habilitado'
+  post_deploy_enabled:
+    description: 'true si el stage post_deploy está habilitado'
+  deploy_opa_enabled:
+    description: 'true si el stage deploy_opa está habilitado'
+  tools_java:
+    description: 'Versión de Java configurada'
+  tools_maven:
+    description: 'Versión de Maven configurada'
+  tools_gradle:
+    description: 'Versión de Gradle configurada'
+  tools_node:
+    description: 'Versión de Node.js configurada'
+  tools_pnpm:
+    description: 'Versión de pnpm configurada'
+  tools_go:
+    description: 'Versión de Go configurada'
+  tools_python:
+    description: 'Versión de Python configurada'
+  tools_dotnet:
+    description: 'Versión de .NET configurada'
+  ActionsCoreLib_type:
+    description: 'Tipo de ActionsCoreLib (app | deploy | terraform | library | infra | generic)'
+
+runs:
+  using: 'node24'
+  main: 'dist/bundle/index.js'

@@ -1,0 +1,1 @@
+{"version":3,"file":"LintStage.d.ts","sourceRoot":"","sources":["../../src/stages/LintStage.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,aAAa,EAAE,MAAM,sBAAsB,CAAC;AACrD,OAAO,EAAE,WAAW,EAAE,MAAM,yBAAyB,CAAC;AAItD,qBAAa,SAAU,SAAQ,aAAa;IACpC,GAAG,CAAC,KAAK,EAAE,WAAW,GAAG,OAAO,CAAC,IAAI,CAAC;CAW7C"}
