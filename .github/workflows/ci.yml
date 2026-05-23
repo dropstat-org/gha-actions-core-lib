@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'dist/**'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    outputs:
+      compile_enabled:     ${{ steps.cfg.outputs.compile_enabled }}
+      unit_test_enabled:   ${{ steps.cfg.outputs.unit_test_enabled }}
+      linter_enabled:      ${{ steps.cfg.outputs.linter_enabled }}
+      semgrep_enabled:     ${{ steps.cfg.outputs.semgrep_enabled }}
+      sonarqube_enabled:   ${{ steps.cfg.outputs.sonarqube_enabled }}
+      trivy_enabled:       ${{ steps.cfg.outputs.trivy_enabled }}
+      checkov_enabled:     ${{ steps.cfg.outputs.checkov_enabled }}
+      publish_enabled:     ${{ steps.cfg.outputs.publish_enabled }}
+      ActionsCoreLib_type: ${{ steps.cfg.outputs.ActionsCoreLib_type }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: config
+
+  compile:
+    name: Compile
+    needs: config
+    if: needs.config.outputs.compile_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: compile
+
+  unit_test:
+    name: Unit Test
+    needs: [config, compile]
+    if: |
+      always() &&
+      needs.config.outputs.unit_test_enabled == 'true' &&
+      needs.compile.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: unit_test
+
+  linter:
+    name: Linter
+    needs: [config, compile]
+    if: |
+      always() &&
+      needs.config.outputs.linter_enabled == 'true' &&
+      needs.compile.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: linter
+
+  semgrep:
+    name: Semgrep
+    needs: [config, compile]
+    if: |
+      always() &&
+      needs.config.outputs.semgrep_enabled == 'true' &&
+      needs.compile.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: semgrep
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sonarqube:
+    name: SonarQube
+    needs: [config, compile]
+    if: |
+      always() &&
+      needs.config.outputs.sonarqube_enabled == 'true' &&
+      needs.compile.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: sonarqube
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  trivy:
+    name: Trivy
+    needs: [config, compile]
+    if: |
+      always() &&
+      needs.config.outputs.trivy_enabled == 'true' &&
+      needs.compile.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: trivy
+
+  checkov:
+    name: Checkov
+    needs: config
+    if: needs.config.outputs.checkov_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: checkov
+
+  publish:
+    name: Publish
+    needs: [config, compile, unit_test, linter, semgrep, trivy]
+    if: |
+      always() &&
+      needs.config.outputs.publish_enabled == 'true' &&
+      needs.compile.result == 'success' &&
+      needs.unit_test.result != 'failure' &&
+      needs.linter.result != 'failure' &&
+      needs.semgrep.result != 'failure' &&
+      needs.trivy.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
