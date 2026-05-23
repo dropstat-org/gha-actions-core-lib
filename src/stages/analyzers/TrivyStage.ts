@@ -8,6 +8,7 @@ import { uploadSarif } from '../../utils/SarifUploader';
 import { shortSHA } from '../../utils/ImageSHA';
 import { DockerECR } from '../../artifacts/DockerECR';
 import { StageMessage } from '../../utils/StageMessage';
+import { DockerArtifactManager } from '../../utils/DockerArtifactManager';
 
 export class TrivyStage extends AbstractAnalyzerStage {
   protected resultMap(): ResultMap {
@@ -58,6 +59,7 @@ export class TrivyStage extends AbstractAnalyzerStage {
 
       let scanType = stage.trivy?.scanType ?? 'fs';
       let imageRef = stage.trivy?.imageRef;
+      let localShaTag: string | undefined;
 
       // When there are build commands and a docker publish config, auto-switch to
       // image scan: export IMAGE_TAG, run the build commands, then scan the local image.
@@ -66,16 +68,15 @@ export class TrivyStage extends AbstractAnalyzerStage {
       const hasBuildCommands = !!stage.commands?.length;
 
       if (hasBuildCommands && hasDockerConfig && scanType === 'fs' && !imageRef) {
-        const shaTag = `sha-${shortSHA(this.config.metadata.commitHash ?? '')}`;
-        StageMessage.exportEnv('IMAGE_TAG', shaTag);
+        localShaTag = `sha-${shortSHA(this.config.metadata.commitHash ?? '')}`;
+        StageMessage.exportEnv('IMAGE_TAG', localShaTag);
         await this.execCommands(stage.commands!, this._effectiveTools(stage));
         scanType = 'image';
-        imageRef = `${this.config.metadata.artifactId}:${shaTag}`;
+        imageRef = `${this.config.metadata.artifactId}:${localShaTag}`;
         core.info(`Scanning locally-built image: ${imageRef}`);
       }
 
       // Auto-resolve ECR image ref when scanType=image and no explicit imageRef.
-      // Trivy authenticates to ECR natively via AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
       if (scanType === 'image' && !imageRef) {
         const resolved = await this.resolveECRImageRef();
         if (resolved) {
@@ -98,6 +99,13 @@ export class TrivyStage extends AbstractAnalyzerStage {
       ], { ignoreReturnCode: true });
 
       this.handleResult(this.mapResult(code), stage.name, SOFT_FAIL);
+
+      // Save the locally-built image as artifact so Publish can load it without rebuilding.
+      // Only save when scan passed (or soft_fail — publish will still run in both cases).
+      if (localShaTag && imageRef && (code === 0 || SOFT_FAIL)) {
+        const artifactName = DockerArtifactManager.artifactName(localShaTag);
+        await new DockerArtifactManager().save(imageRef, artifactName);
+      }
 
       if (UPLOAD_SARIF) {
         await exec.exec('trivy', [

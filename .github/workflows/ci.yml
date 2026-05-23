@@ -194,3 +194,25 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+
+  cleanup:
+    name: Cleanup
+    needs: [config, trivy, publish]
+    if: always() && needs.config.outputs.trivy_enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete docker image artifact
+        run: |
+          ARTIFACT_NAME="docker-image-sha-${GITHUB_SHA:0:7}"
+          ARTIFACT_ID=$(gh api repos/$GITHUB_REPOSITORY/actions/artifacts \
+            --jq ".artifacts[] | select(.name == \"$ARTIFACT_NAME\") | .id" 2>/dev/null)
+          if [ -n "$ARTIFACT_ID" ]; then
+            gh api repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID -X DELETE
+            echo "Deleted artifact: $ARTIFACT_NAME (id: $ARTIFACT_ID)"
+          else
+            echo "No artifact to clean up: $ARTIFACT_NAME"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

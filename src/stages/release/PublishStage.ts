@@ -4,6 +4,7 @@ import { StageConfig } from '../../entities/StageConfig';
 import { ArchiveManager } from '../../archive/ArchiveManager';
 import { StageMessage, StageOutputKey } from '../../utils/StageMessage';
 import { shortSHA } from '../../utils/ImageSHA';
+import { DockerArtifactManager } from '../../utils/DockerArtifactManager';
 
 export class PublishStage extends AbstractStage {
   private archive = new ArchiveManager();
@@ -26,8 +27,13 @@ export class PublishStage extends AbstractStage {
       StageMessage.exportEnv('OCI_VERSION',  version);
       StageMessage.exportEnv('OCI_SOURCE',   process.env.GITHUB_REPOSITORY ?? '');
 
-      if (stage.commands && stage.commands.length > 0) {
-        core.info('Running build commands');
+      // Try to load the image from artifact (built and scanned by Trivy job).
+      // Falls back to build commands if artifact is not available.
+      const artifactName = DockerArtifactManager.artifactName(shaTag);
+      const loadedFromArtifact = await new DockerArtifactManager().load(artifactName);
+
+      if (!loadedFromArtifact && stage.commands && stage.commands.length > 0) {
+        core.info('Running build commands (image not found in artifact)');
         await this.execCommands(stage.commands, this._effectiveTools(stage));
       }
 
