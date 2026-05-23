@@ -1,1 +1,0 @@
-{"version":3,"file":"ApproverChecker.d.ts","sourceRoot":"","sources":["../../../src/stages/validate/ApproverChecker.ts"],"names":[],"mappings":"AAAA,MAAM,WAAW,eAAe;IAC9B,KAAK,EAAE,MAAM,CAAC;IACd,GAAG,EAAE,MAAM,CAAC;IACZ,IAAI,EAAE,MAAM,CAAC;CACd;AAED,MAAM,WAAW,eAAe;IAC9B,KAAK,CAAC,OAAO,EAAE,eAAe,GAAG,OAAO,CAAC,OAAO,CAAC,CAAC;IAClD,QAAQ,IAAI,MAAM,CAAC;CACpB"}

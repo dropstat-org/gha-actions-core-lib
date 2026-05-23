@@ -1,0 +1,15 @@
+node_modules/
+dist/stages/
+dist/workflows/
+dist/entities/
+dist/artifacts/
+dist/archive/
+dist/config/
+dist/enums/
+dist/utils/
+dist/__tests__/
+dist/index.js
+dist/index.js.map
+dist/**/*.d.ts
+dist/**/*.d.ts.map
+dist/**/*.js.map
