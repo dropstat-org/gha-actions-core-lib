@@ -11,9 +11,9 @@ inputs:
     required: false
     default: 'action.yaml'
   platform-config-repo:
-    description: 'Nombre del repositorio de configuración dentro de la organización. Por defecto usa GITHUB_REPOSITORY_OWNER como org y platform-config como repo.'
+    description: 'Nombre del repositorio de configuración dentro de la organización. Por defecto usa GITHUB_REPOSITORY_OWNER como org y gha-platform-config como repo.'
     required: false
-    default: 'platform-config'
+    default: 'gha-platform-config'
 
 outputs:
   compile_enabled:
