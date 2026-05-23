@@ -1,4 +1,4 @@
-name: CI
+name: Required CI
 
 on:
   push:
