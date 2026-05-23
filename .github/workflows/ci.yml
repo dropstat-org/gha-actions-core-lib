@@ -156,6 +156,8 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: trivy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   checkov:
     name: Checkov

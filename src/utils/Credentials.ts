@@ -39,8 +39,7 @@ export class Credentials {
   static orgReadToken(): string { return this.optional('ORG_READ_TOKEN'); }
   static sonarToken(): string   { return this.optional('SONAR_TOKEN'); }
   static ghToken(): string {
-    // Prefer explicit GH_TOKEN override (set in step env) over GITHUB_TOKEN
-    return this.optional('GH_TOKEN') || this.require('GITHUB_TOKEN');
+    return this.optional('GH_TOKEN') || this.optional('GITHUB_TOKEN');
   }
   static awsAccessKeyId(): string     { return this.optional('AWS_ACCESS_KEY_ID'); }
   static awsSecretAccessKey(): string { return this.optional('AWS_SECRET_ACCESS_KEY'); }
