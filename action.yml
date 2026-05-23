@@ -58,5 +58,5 @@ outputs:
     description: 'Tipo de ActionsCoreLib (app | deploy | terraform | library | infra | generic)'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/bundle/index.js'
