@@ -35,17 +35,20 @@ export class DeployStage extends AbstractDeployStage {
       }
     }
 
-    const applyCmds = commands.filter(cmd => containsSubcommand(cmd, 'apply'));
-    if (applyCmds.length === 0) {
+    const applyCmds   = commands.filter(cmd => containsSubcommand(cmd, 'apply'));
+    const destroyCmds = commands.filter(cmd => containsSubcommand(cmd, 'destroy'));
+
+    if (applyCmds.length === 0 && destroyCmds.length === 0) {
       throw new ActionsCoreLibError(
         ErrorCode.MISSING_STAGE_COMMANDS,
-        `Terraform deploy stage requires at least one 'apply' command`,
+        `Terraform deploy stage requires at least one 'apply' or 'destroy' command`,
       );
     }
 
     // run-all apply manages plan state per-module internally (.terragrunt-cache),
     // so no explicit plan file arg is required. Single-module apply must still
     // reference the plan file to prevent an unreviewed re-plan.
+    // destroy commands do not require a plan file reference.
     for (const applyCmd of applyCmds) {
       if (!containsSubcommand(applyCmd, 'run-all') && !applyHasPlanFileArg(applyCmd)) {
         throw new ActionsCoreLibError(
