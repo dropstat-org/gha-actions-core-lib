@@ -1,0 +1,111 @@
+name: Terraform Deploy (reusable)
+
+on:
+  workflow_call:
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    outputs:
+      plan_enabled:       ${{ steps.cfg.outputs.plan_enabled }}
+      checkov_tf_enabled: ${{ steps.cfg.outputs.checkov_tf_enabled }}
+      deploy_enabled:     ${{ steps.cfg.outputs.deploy_enabled }}
+      release_enabled:    ${{ steps.cfg.outputs.release_enabled }}
+      deploy_environment: ${{ steps.cfg.outputs.deploy_environment }}
+      tools_terraform:    ${{ steps.cfg.outputs.tools_terraform }}
+      tools_terragrunt:   ${{ steps.cfg.outputs.tools_terragrunt }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: config
+
+  plan:
+    name: Plan
+    needs: config
+    if: needs.config.outputs.plan_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-CD-plan
+          terraform-version: ${{ needs.config.outputs.tools_terraform || '1.7.5' }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt || '0.55.18' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: plan
+
+  checkov_tf:
+    name: Checkov Terraform
+    needs: [config, plan]
+    if: |
+      always() &&
+      needs.config.outputs.checkov_tf_enabled == 'true' &&
+      needs.plan.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: checkov_tf
+
+  approve:
+    name: Approve Deploy
+    needs: [config, plan, checkov_tf]
+    if: |
+      always() &&
+      needs.config.outputs.deploy_enabled == 'true' &&
+      needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.config.outputs.deploy_environment }}
+    steps:
+      - name: Deploy approved
+        run: echo "Deploy approved by ${{ github.actor }}"
+
+  deploy:
+    name: Deploy
+    needs: [config, plan, checkov_tf, approve]
+    if: |
+      always() &&
+      needs.config.outputs.deploy_enabled == 'true' &&
+      needs.plan.result == 'success' &&
+      needs.approve.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-CD-deploy
+          terraform-version: ${{ needs.config.outputs.tools_terraform || '1.7.5' }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt || '0.55.18' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: deploy
+
+  release:
+    name: Release
+    needs: [config, deploy]
+    if: |
+      always() &&
+      needs.config.outputs.release_enabled == 'true' &&
+      needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
