@@ -7,8 +7,7 @@ on:
       - 'dist/**'
   pull_request:
   workflow_dispatch:
-  workflow_call:
-    secrets: inherit
+  workflow_call: # secrets are inherited automatically when caller uses `secrets: inherit`
 
 jobs:
   config:
