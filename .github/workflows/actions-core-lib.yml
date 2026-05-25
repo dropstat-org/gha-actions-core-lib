@@ -7,6 +7,8 @@ on:
       - 'dist/**'
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    secrets: inherit
 
 jobs:
   config:
