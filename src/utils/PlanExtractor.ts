@@ -104,8 +104,9 @@ export class PlanExtractor {
     // Handles both forms: --out=file  and  --out file
     const cleanCmd = cmd.replace(/\s+-{1,2}out(?:=\S+|\s+\S+)/g, '').trimEnd();
 
+    const ni      = runAll     ? ' --terragrunt-non-interactive' : '';
     const planCmd = `${cleanCmd} --out ${binary}`;
-    const showCmd = `terragrunt ${ra}show -json ${binary}${wd} > ${json}`;
+    const showCmd = `terragrunt ${ra}show -json ${binary}${ni}${wd} > ${json}`;
     return [planCmd, showCmd];
   }
 

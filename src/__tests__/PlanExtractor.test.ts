@@ -142,10 +142,10 @@ describe('PlanExtractor.buildRunCommands', () => {
     expect(show).toBe('terragrunt show -json tfplan1-platform-infra-1.2.3.binary > tfplan1-platform-infra-1.2.3.json');
   });
 
-  it('case 2 — run-all plan: show command includes run-all', () => {
+  it('case 2 — run-all plan: show command includes run-all and --terragrunt-non-interactive', () => {
     const [plan, show] = extractor().buildRunCommands('terragrunt run-all plan', 1);
     expect(plan).toBe('terragrunt run-all plan --out tfplan1-platform-infra-1.2.3.binary');
-    expect(show).toBe('terragrunt run-all show -json tfplan1-platform-infra-1.2.3.binary > tfplan1-platform-infra-1.2.3.json');
+    expect(show).toBe('terragrunt run-all show -json tfplan1-platform-infra-1.2.3.binary --terragrunt-non-interactive > tfplan1-platform-infra-1.2.3.json');
   });
 
   it('case 3 — plan with working-dir: show command propagates --terragrunt-working-dir', () => {
@@ -156,12 +156,12 @@ describe('PlanExtractor.buildRunCommands', () => {
     expect(show).toBe('terragrunt show -json tfplan1-platform-infra-1.2.3.binary --terragrunt-working-dir ./envs/dev > tfplan1-platform-infra-1.2.3.json');
   });
 
-  it('case 4 — run-all plan with working-dir: show has both run-all and working-dir', () => {
+  it('case 4 — run-all plan with working-dir: show has run-all, --terragrunt-non-interactive and working-dir', () => {
     const [plan, show] = extractor().buildRunCommands(
       'terragrunt run-all plan --terragrunt-working-dir ./envs/prod', 2,
     );
     expect(plan).toBe('terragrunt run-all plan --terragrunt-working-dir ./envs/prod --out tfplan2-platform-infra-1.2.3.binary');
-    expect(show).toBe('terragrunt run-all show -json tfplan2-platform-infra-1.2.3.binary --terragrunt-working-dir ./envs/prod > tfplan2-platform-infra-1.2.3.json');
+    expect(show).toBe('terragrunt run-all show -json tfplan2-platform-infra-1.2.3.binary --terragrunt-non-interactive --terragrunt-working-dir ./envs/prod > tfplan2-platform-infra-1.2.3.json');
   });
 
   it('uses cmdIndex in filenames', () => {
