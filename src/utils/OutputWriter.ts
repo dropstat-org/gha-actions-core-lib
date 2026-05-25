@@ -48,15 +48,20 @@ export class OutputWriter {
     }
 
     const tools = config.tools ?? {};
-    core.setOutput('tools_java',    tools.java    ?? '');
-    core.setOutput('tools_maven',   tools.maven   ?? '');
-    core.setOutput('tools_gradle',  tools.gradle  ?? '');
-    core.setOutput('tools_node',    tools.node    ?? '');
-    core.setOutput('tools_pnpm',    tools.pnpm    ?? '');
-    core.setOutput('tools_go',      tools.go      ?? '');
-    core.setOutput('tools_python',  tools.python  ?? '');
-    core.setOutput('tools_dotnet',  tools.dotnet  ?? '');
-    core.setOutput('ActionsCoreLib_type',  config.type);
+    core.setOutput('tools_java',       tools.java       ?? '');
+    core.setOutput('tools_maven',      tools.maven      ?? '');
+    core.setOutput('tools_gradle',     tools.gradle     ?? '');
+    core.setOutput('tools_node',       tools.node       ?? '');
+    core.setOutput('tools_pnpm',       tools.pnpm       ?? '');
+    core.setOutput('tools_go',         tools.go         ?? '');
+    core.setOutput('tools_python',     tools.python     ?? '');
+    core.setOutput('tools_dotnet',     tools.dotnet     ?? '');
+    core.setOutput('tools_terraform',  tools.terraform  ?? '');
+    core.setOutput('tools_terragrunt', tools.terragrunt ?? '');
+    core.setOutput('ActionsCoreLib_type', config.type);
+
+    const deployStage = config.stages.find(s => s.name === StageName.DEPLOY);
+    core.setOutput('deploy_environment', deployStage?.deploy?.environment ?? '');
 
     const deployPolicies = await PlatformConfigLoader.deployPolicy();
     const policy = deployPolicies[config.type] ?? { teams: [], users: [], min_permission: '' };

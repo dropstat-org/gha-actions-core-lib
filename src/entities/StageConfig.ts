@@ -9,6 +9,8 @@ export interface StageTools {
   go?: string;
   python?: string;
   dotnet?: string;
+  terraform?: string;
+  terragrunt?: string;
 }
 
 export interface DockerArtifact {

@@ -1,0 +1,59 @@
+name: Setup Terraform + Terragrunt + AWS
+description: Installs pinned tool versions and configures AWS credentials via OIDC
+
+inputs:
+  aws-role-arn:
+    required: true
+    description: IAM role ARN to assume via OIDC
+  aws-region:
+    required: false
+    default: us-east-2
+  terraform-version:
+    required: false
+    default: "1.7.5"
+  terragrunt-version:
+    required: false
+    default: "0.55.18"
+  session-name:
+    required: false
+    default: GitHubActions
+
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: ${{ inputs.session-name }}-${{ github.run_id }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false  # wrapper breaks terragrunt output parsing
+
+    - name: Install Terragrunt
+      shell: bash
+      run: |
+        TG_VERSION="${{ inputs.terragrunt-version }}"
+        curl -sSfL \
+          "https://github.com/gruntwork-io/terragrunt/releases/download/v${TG_VERSION}/terragrunt_linux_amd64" \
+          -o /usr/local/bin/terragrunt
+        chmod +x /usr/local/bin/terragrunt
+        terragrunt --version
+
+    - name: Configure Terraform plugin cache
+      shell: bash
+      run: |
+        mkdir -p "$HOME/.terraform.d/plugin-cache"
+        echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
+
+    - name: Cache Terraform providers
+      uses: actions/cache@v4
+      with:
+        path: ~/.terraform.d/plugin-cache
+        key: ${{ runner.os }}-tf-providers-${{ hashFiles('**/.terraform.lock.hcl') }}
+        restore-keys: |
+          ${{ runner.os }}-tf-providers-

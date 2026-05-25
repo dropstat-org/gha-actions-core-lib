@@ -1,4 +1,4 @@
-﻿name: ActionsCoreLib
+name: ActionsCoreLib
 
 on:
   push:
@@ -20,18 +20,26 @@ jobs:
       sonarqube_enabled:   ${{ steps.ActionsCoreLib.outputs.sonarqube_enabled }}
       trivy_enabled:       ${{ steps.ActionsCoreLib.outputs.trivy_enabled }}
       checkov_enabled:     ${{ steps.ActionsCoreLib.outputs.checkov_enabled }}
+      checkov_tf_enabled:  ${{ steps.ActionsCoreLib.outputs.checkov_tf_enabled }}
+      plan_enabled:        ${{ steps.ActionsCoreLib.outputs.plan_enabled }}
       publish_enabled:     ${{ steps.ActionsCoreLib.outputs.publish_enabled }}
+      release_enabled:     ${{ steps.ActionsCoreLib.outputs.release_enabled }}
       deploy_enabled:      ${{ steps.ActionsCoreLib.outputs.deploy_enabled }}
       pre_deploy_enabled:  ${{ steps.ActionsCoreLib.outputs.pre_deploy_enabled }}
       post_deploy_enabled: ${{ steps.ActionsCoreLib.outputs.post_deploy_enabled }}
       deploy_opa_enabled:  ${{ steps.ActionsCoreLib.outputs.deploy_opa_enabled }}
-      ActionsCoreLib_type:        ${{ steps.ActionsCoreLib.outputs.ActionsCoreLib_type }}
+      deploy_environment:  ${{ steps.ActionsCoreLib.outputs.deploy_environment }}
+      tools_terraform:     ${{ steps.ActionsCoreLib.outputs.tools_terraform }}
+      tools_terragrunt:    ${{ steps.ActionsCoreLib.outputs.tools_terragrunt }}
+      ActionsCoreLib_type: ${{ steps.ActionsCoreLib.outputs.ActionsCoreLib_type }}
     steps:
       - uses: actions/checkout@v4
       - id: ActionsCoreLib
         uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: config
+
+  # ── App / Library stages ────────────────────────────────────────────────────
 
   compile:
     name: Compile
@@ -189,16 +197,70 @@ jobs:
         with:
           stage: deploy_opa
 
-  deploy:
-    name: Deploy
-    needs: [config, deploy_opa]
+  # ── Terraform stages ────────────────────────────────────────────────────────
+
+  plan:
+    name: Plan
+    needs: config
+    if: needs.config.outputs.plan_enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-plan
+          terraform-version: ${{ needs.config.outputs.tools_terraform || '1.7.5' }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt || '0.55.18' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: plan
+
+  checkov_tf:
+    name: Checkov Terraform
+    needs: [config, plan]
     if: |
       always() &&
-      needs.config.outputs.deploy_enabled == 'true' &&
-      needs.deploy_opa.result != 'failure'
+      needs.config.outputs.checkov_tf_enabled == 'true' &&
+      needs.plan.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: checkov_tf
+
+  # ── Deploy (shared: app + terraform) ────────────────────────────────────────
+
+  deploy:
+    name: Deploy
+    needs: [config, deploy_opa, plan]
+    # environment gate: uses deploy.environment from action.yaml (empty = no gate for app repos)
+    environment: ${{ needs.config.outputs.deploy_environment }}
+    if: |
+      always() &&
+      needs.config.outputs.deploy_enabled == 'true' &&
+      needs.deploy_opa.result != 'failure' &&
+      (needs.plan.result == 'success' || needs.plan.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      # Solo para repos terraform — app repos no tienen AWS_ROLE_ARN ni necesitan OIDC aquí
+      - name: Setup Terraform + AWS
+        if: needs.config.outputs.plan_enabled == 'true'
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-deploy
+          terraform-version: ${{ needs.config.outputs.tools_terraform || '1.7.5' }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt || '0.55.18' }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: deploy
@@ -219,3 +281,21 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: post_deploy
+
+  release:
+    name: Release
+    needs: [config, deploy]
+    if: |
+      always() &&
+      needs.config.outputs.release_enabled == 'true' &&
+      needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
