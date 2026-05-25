@@ -13,6 +13,9 @@ export interface ResourceChange {
 
 export interface PlanSummaryResult {
   account: string;
+  /** Absolute module path from `terragrunt output-module-groups`. Present only when
+   *  the plan stage captured it and wired it through `writeSummaryForPlans`. */
+  modulePath?: string;
   toCreate:  ResourceChange[];
   toUpdate:  ResourceChange[];
   toDelete:  ResourceChange[];
@@ -89,12 +92,20 @@ export class PlanSummary {
 
   /**
    * Renders the summary as markdown for GitHub Job Summary.
-   * Includes a count table and per-action resource lists.
+   * Includes the account name, an optional module path (when available),
+   * a count table and per-action resource lists.
    */
   static toMarkdown(r: PlanSummaryResult): string {
     const lines: string[] = [
       `## Terraform Plan: \`${r.account}\``,
       '',
+    ];
+
+    if (r.modulePath) {
+      lines.push(`> 📁 **Module path:** \`${r.modulePath}\``, '');
+    }
+
+    lines.push(
       '| Action    | Count |',
       '|-----------|------:|',
       `| ➕ Create  | ${r.toCreate.length}  |`,
@@ -102,7 +113,7 @@ export class PlanSummary {
       `| 🗑️ Delete  | ${r.toDelete.length}  |`,
       `| ♻️ Replace | ${r.toReplace.length} |`,
       '',
-    ];
+    );
 
     if (r.toCreate.length)  lines.push(...resourceSection('➕ Resources to Create',  r.toCreate));
     if (r.toUpdate.length)  lines.push(...resourceSection('🔄 Resources to Update',  r.toUpdate));
@@ -135,8 +146,15 @@ export class PlanSummary {
    * Called automatically by PlanStage. Also available for custom stages:
    *   const files = await StageTransfer.findFiles(PlanGlobs.JSON);
    *   await PlanSummary.writeSummaryForPlans(files);
+   *
+   * @param modulePathsMap  Optional map from file path → absolute module path
+   *                        (produced by PlanStage after running output-module-groups).
+   *                        When present the module path is rendered under each plan heading.
    */
-  static async writeSummaryForPlans(planFiles: string[]): Promise<void> {
+  static async writeSummaryForPlans(
+    planFiles: string[],
+    modulePathsMap?: Record<string, string>,
+  ): Promise<void> {
     if (planFiles.length === 0) {
       Logger.warn('PlanSummary: no plan files to summarize');
       return;
@@ -151,6 +169,8 @@ export class PlanSummary {
       }
       try {
         const result = this.fromFile(filePath);
+        const modulePath = modulePathsMap?.[filePath];
+        if (modulePath) result.modulePath = modulePath;
         this.logInline(result);
         core.summary.addRaw(this.toMarkdown(result) + '\n\n---\n\n');
         hasContent = true;

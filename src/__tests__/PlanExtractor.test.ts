@@ -313,6 +313,106 @@ describe('PlanExtractor.extractPerAccountPlans', () => {
 
     expect(result[0].filePath).toBe('tfplan3-acct-d-01.json');
   });
+
+  it('assigns modulePath from modulePaths by module index', () => {
+    const jsonl = [planLine('acct-d-01'), planLine('acct-d-02')].join('\n');
+    jest.spyOn(fs, 'readFileSync').mockReturnValue(jsonl);
+
+    const result = extractor().extractPerAccountPlans(1, 'fallback', [
+      '/live/network/vpc',
+      '/live/shared/ecr',
+    ]);
+
+    expect(result[0].modulePath).toBe('/live/network/vpc');
+    expect(result[1].modulePath).toBe('/live/shared/ecr');
+  });
+
+  it('leaves modulePath undefined when no modulePaths provided', () => {
+    jest.spyOn(fs, 'readFileSync').mockReturnValue(planLine('acct-d-01'));
+
+    const result = extractor().extractPerAccountPlans(1, 'fallback');
+
+    expect(result[0].modulePath).toBeUndefined();
+  });
+
+  it('leaves modulePath undefined when modulePaths array is shorter than modules', () => {
+    const jsonl = [planLine('acct-d-01'), planLine('acct-d-02')].join('\n');
+    jest.spyOn(fs, 'readFileSync').mockReturnValue(jsonl);
+
+    // Only one path provided for two modules
+    const result = extractor().extractPerAccountPlans(1, 'fallback', ['/live/network/vpc']);
+
+    expect(result[0].modulePath).toBe('/live/network/vpc');
+    expect(result[1].modulePath).toBeUndefined();
+  });
+
+  it('moduleIndex advances only on successfully-parsed JSON lines', () => {
+    const core = require('@actions/core');
+    // non-JSON line in the middle — modulePaths[0] should map to acct-d-01, [1] to acct-d-02
+    const jsonl = [planLine('acct-d-01'), 'not-json', planLine('acct-d-02')].join('\n');
+    jest.spyOn(fs, 'readFileSync').mockReturnValue(jsonl);
+
+    const result = extractor().extractPerAccountPlans(1, 'fallback', [
+      '/live/network/vpc',
+      '/live/shared/ecr',
+    ]);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].modulePath).toBe('/live/network/vpc');
+    expect(result[1].modulePath).toBe('/live/shared/ecr');
+    expect(core.warning).toHaveBeenCalledWith(expect.stringContaining('skipping non-JSON'));
+  });
+});
+
+// ── flattenModuleGroups ───────────────────────────────────────────────────────
+
+describe('PlanExtractor.flattenModuleGroups', () => {
+  it('returns [] for empty string', () => {
+    expect(PlanExtractor.flattenModuleGroups('')).toEqual([]);
+  });
+
+  it('returns [] for whitespace-only string', () => {
+    expect(PlanExtractor.flattenModuleGroups('   ')).toEqual([]);
+  });
+
+  it('returns [] for invalid JSON', () => {
+    expect(PlanExtractor.flattenModuleGroups('not-json')).toEqual([]);
+  });
+
+  it('returns [] for empty groups object', () => {
+    expect(PlanExtractor.flattenModuleGroups('{}')).toEqual([]);
+  });
+
+  it('returns all paths in order for a single group', () => {
+    const json = JSON.stringify({ 'Group 1': ['/live/network/vpc', '/live/network/tgw'] });
+    expect(PlanExtractor.flattenModuleGroups(json)).toEqual(['/live/network/vpc', '/live/network/tgw']);
+  });
+
+  it('returns first path from each group when multiple groups present', () => {
+    const json = JSON.stringify({
+      'Group 1': ['/live/network/vpc'],
+      'Group 2': ['/live/shared/ecr'],
+      'Group 3': ['/live/workloads/dev'],
+    });
+    expect(PlanExtractor.flattenModuleGroups(json)).toEqual([
+      '/live/network/vpc',
+      '/live/shared/ecr',
+      '/live/workloads/dev',
+    ]);
+  });
+
+  it('handles groups with empty path arrays gracefully', () => {
+    const json = JSON.stringify({ 'Group 1': [], 'Group 2': ['/live/shared/ecr'] });
+    const result = PlanExtractor.flattenModuleGroups(json);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toBe('');  // empty group → ''
+    expect(result[1]).toBe('/live/shared/ecr');
+  });
+
+  it('trims leading/trailing whitespace before parsing', () => {
+    const json = `\n  ${JSON.stringify({ 'G': ['/a/b'] })}  \n`;
+    expect(PlanExtractor.flattenModuleGroups(json)).toEqual(['/a/b']);
+  });
 });
 
 // ── filterPerAccountPlans ─────────────────────────────────────────────────────

@@ -13,7 +13,10 @@ jest.mock('@actions/core', () => ({
   info: jest.fn(), startGroup: jest.fn(), endGroup: jest.fn(),
   warning: jest.fn(), error: jest.fn(), debug: jest.fn(), notice: jest.fn(),
 }));
-jest.mock('@actions/exec', () => ({ exec: jest.fn().mockResolvedValue(0) }));
+jest.mock('@actions/exec', () => ({
+  exec: jest.fn().mockResolvedValue(0),
+  getExecOutput: jest.fn().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' }),
+}));
 jest.mock('../utils/ArtifactHandler', () => ({
   ArtifactHandler: jest.fn().mockImplementation(() => ({
     upload:   jest.fn().mockResolvedValue(undefined),
@@ -57,11 +60,18 @@ jest.mock('../utils/PlanExtractor', () => {
       `${cmd} --out tfplan${idx}-platform-infra-1.0.0.binary`,
       `terragrunt show -json tfplan${idx}-platform-infra-1.0.0.binary > tfplan${idx}-platform-infra-1.0.0.json`,
     ]),
+    buildModuleGroupsCommand: jest.fn().mockReturnValue('terragrunt output-module-groups 2>/dev/null'),
     extractPerAccountPlans: jest.fn().mockReturnValue([]),
     filterPerAccountPlans:  jest.fn().mockReturnValue([]),
   }));
-  (MockPlanExtractor as jest.Mock & { isPlanCommand: (cmd: string) => boolean })
-    .isPlanCommand = (cmd: string) => cmd.trim().split(/\s+/).includes('plan');
+  (MockPlanExtractor as jest.Mock & {
+    isPlanCommand: (cmd: string) => boolean;
+    flattenModuleGroups: (json: string) => string[];
+  }).isPlanCommand = (cmd: string) => cmd.trim().split(/\s+/).includes('plan');
+  (MockPlanExtractor as jest.Mock & {
+    isPlanCommand: (cmd: string) => boolean;
+    flattenModuleGroups: (json: string) => string[];
+  }).flattenModuleGroups = (_json: string) => [];
   return { PlanExtractor: MockPlanExtractor };
 });
 
@@ -253,5 +263,60 @@ describe('PlanStage — plan command expansion', () => {
     // PlanExtractor is instantiated once per execute call
     const MockExtractor = PlanExtractor as unknown as jest.Mock;
     expect(MockExtractor).toHaveBeenCalled();
+  });
+});
+
+// ── Module groups — output-module-groups capture ──────────────────────────────
+
+describe('PlanStage — module groups capture', () => {
+  it('calls getExecOutput with the module groups command for each plan command', async () => {
+    await planStage(BranchType.DEVELOP).execute(stageConfig({ commands: ['terragrunt plan'] }));
+
+    const mockGetExecOutput = exec.getExecOutput as jest.Mock;
+    expect(mockGetExecOutput).toHaveBeenCalledWith(
+      'bash',
+      ['-c', 'terragrunt output-module-groups 2>/dev/null'],
+      expect.objectContaining({ ignoreReturnCode: true, silent: true }),
+    );
+  });
+
+  it('does not call getExecOutput for non-plan commands', async () => {
+    // Need a plan command too, otherwise NO_PLAN_COMMAND_FOUND throws
+    await planStage(BranchType.DEVELOP).execute(stageConfig({
+      commands: ['terragrunt state list', 'terragrunt plan'],
+    }));
+
+    const mockGetExecOutput = exec.getExecOutput as jest.Mock;
+    // getExecOutput called once — only for the plan command, not for state list
+    expect(mockGetExecOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues gracefully when getExecOutput rejects', async () => {
+    (exec.getExecOutput as jest.Mock).mockRejectedValueOnce(new Error('not found'));
+
+    await expect(
+      planStage(BranchType.DEVELOP).execute(stageConfig({ commands: ['terragrunt plan'] })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('passes module paths from flattenModuleGroups to extractPerAccountPlans', async () => {
+    const mockPaths = ['/live/network/vpc'];
+    (exec.getExecOutput as jest.Mock).mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: JSON.stringify({ 'Group 1': mockPaths }),
+      stderr: '',
+    });
+    // Override flattenModuleGroups to return our paths
+    (PlanExtractor as unknown as { flattenModuleGroups: jest.Mock }).flattenModuleGroups =
+      jest.fn().mockReturnValue(mockPaths);
+
+    await planStage(BranchType.DEVELOP).execute(stageConfig({ commands: ['terragrunt plan'] }));
+
+    const instance = (PlanExtractor as unknown as jest.Mock).mock.results[0].value;
+    expect(instance.extractPerAccountPlans).toHaveBeenCalledWith(
+      1,
+      expect.any(String),
+      mockPaths,
+    );
   });
 });

@@ -12,6 +12,9 @@ export interface ExtractedPlan {
   cmdIndex: number;
   accountName: string;
   filePath: string;
+  /** Absolute module path from `terragrunt output-module-groups`. Undefined when the command
+   *  is not available or when this plan was produced by a non-run-all invocation. */
+  modulePath?: string;
 }
 
 /**
@@ -120,13 +123,22 @@ export class PlanExtractor {
 
   /**
    * Reads the raw JSONL plan file and writes one per-account JSON for each line.
-   * Returns the list of file paths created.
+   * Returns the list of extracted plans (file paths + optional module paths).
    *
    * Account name resolution order (mirrors TerragruntUtils.getVarEnvIdFromPlan):
    *   1. planJson.variables.env_id.value
    *   2. fallbackAccount
+   *
+   * @param modulePaths  Ordered list from `PlanExtractor.flattenModuleGroups()`.
+   *                     When provided, each successfully-parsed module is annotated
+   *                     with its absolute path at the matching index — mirrors
+   *                     TerragruntUtils.getFolderModule (moduleCount ↔ moduleIndex).
    */
-  extractPerAccountPlans(cmdIndex: number, fallbackAccount: string): ExtractedPlan[] {
+  extractPerAccountPlans(
+    cmdIndex: number,
+    fallbackAccount: string,
+    modulePaths?: string[],
+  ): ExtractedPlan[] {
     const rawFile = this.rawJsonName(cmdIndex);
 
     if (!fs.existsSync(rawFile)) {
@@ -140,6 +152,7 @@ export class PlanExtractor {
       .filter(l => l.trim().length > 0);
 
     const created: ExtractedPlan[] = [];
+    let moduleIndex = 0; // tracks only successfully-parsed modules (mirrors moduleCount in Groovy)
 
     for (const line of lines) {
       let planJson: Record<string, unknown>;
@@ -152,10 +165,15 @@ export class PlanExtractor {
 
       const accountName = PlanExtractor.resolveAccountName(planJson, fallbackAccount);
       const filePath    = PlanExtractor.perAccountName(cmdIndex, accountName);
+      const modulePath  = modulePaths?.[moduleIndex];
 
       fs.writeFileSync(filePath, JSON.stringify(planJson, null, 2), 'utf8');
-      core.info(`Extracted plan → ${filePath}  (account: ${accountName})`);
-      created.push({ cmdIndex, accountName, filePath });
+      core.info(
+        `Extracted plan → ${filePath}  (account: ${accountName}` +
+        `${modulePath ? `  path: ${modulePath}` : ''})`,
+      );
+      created.push({ cmdIndex, accountName, filePath, modulePath });
+      moduleIndex++;
     }
 
     return created;
@@ -172,6 +190,33 @@ export class PlanExtractor {
     const vars  = planJson?.variables as Record<string, unknown> | undefined;
     const envId = (vars?.env_id as Record<string, unknown> | undefined)?.value;
     return typeof envId === 'string' && envId.length > 0 ? envId : fallback;
+  }
+
+  // ── Module-groups helpers ─────────────────────────────────────────────────
+
+  /**
+   * Parses the JSON output of `terragrunt output-module-groups` and returns
+   * an **ordered flat list** of absolute module paths — one entry per module,
+   * in the same order as the lines in the raw JSONL plan file.
+   *
+   * Mirrors TerragruntUtils.getModuleAbsolutePath / getFolderModule:
+   *   - Single group  → all paths in the group, in order.
+   *   - Multiple groups → first path from each group, in group order.
+   *
+   * Returns [] on empty / invalid input (always safe to call).
+   */
+  static flattenModuleGroups(json: string): string[] {
+    if (!json || !json.trim()) return [];
+    try {
+      const groups = JSON.parse(json.trim()) as Record<string, string[]>;
+      const values = Object.values(groups);
+      if (values.length === 0) return [];
+      if (values.length === 1) return values[0];
+      // Multiple groups: take the first path from each group (mirrors mgArray[moduleCount][0])
+      return values.map(g => g[0] ?? '');
+    } catch {
+      return [];
+    }
   }
 
   // ── File filtering ────────────────────────────────────────────────────────

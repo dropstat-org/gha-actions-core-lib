@@ -1,10 +1,11 @@
 import * as core from '@actions/core';
+import * as exec from '@actions/exec';
 import { AbstractBranchStage } from '../base/AbstractBranchStage';
 import { StageConfig } from '../../entities/StageConfig';
 import { ActionsCoreLibError } from '../../entities/ActionYaml';
 import { ErrorCode } from '../../enums/ErrorCode';
 import { validateDeployForBranch } from '../../utils/AccountValidator';
-import { PlanExtractor } from '../../utils/PlanExtractor';
+import { PlanExtractor, ExtractedPlan } from '../../utils/PlanExtractor';
 import { StageTransfer, PlanArtifacts, PlanGlobs } from '../../utils/StageTransfer';
 import { PlanSummary } from '../../utils/PlanSummary';
 import { PlanSecurity } from '../../utils/PlanSecurity';
@@ -54,7 +55,10 @@ export class PlanStage extends AbstractBranchStage {
     // ── Phase 1: execute commands ──────────────────────────────────────────
     // Plan commands are split into: [plan --out binary] + [show -json > json]
     // Non-plan commands (state list, state rm, import) run as-is.
+    // For each plan command we also capture `output-module-groups` (best-effort)
+    // so the Job Summary can show the module path alongside the account name.
     const planIndices: number[] = [];
+    const modulePathsByCmd = new Map<number, string[]>(); // cmdIndex → ordered module paths
 
     for (const [i, cmd] of commands.entries()) {
       const cmdIndex = i + 1;
@@ -65,6 +69,23 @@ export class PlanStage extends AbstractBranchStage {
 
         core.info(`[plan ${cmdIndex}] ${cmd}`);
         await this.execCommands([planCmd, showCmd], this._effectiveTools(stage));
+
+        // Capture module groups — mirrors PreDeployStage.groovy line 59.
+        // Failure is non-fatal: the plan summary still works without paths.
+        try {
+          const moduleGroupsCmd = extractor.buildModuleGroupsCommand(cmd);
+          const { stdout } = await exec.getExecOutput('bash', ['-c', moduleGroupsCmd], {
+            ignoreReturnCode: true,
+            silent: true,
+          });
+          const paths = PlanExtractor.flattenModuleGroups(stdout);
+          if (paths.length > 0) {
+            modulePathsByCmd.set(cmdIndex, paths);
+            core.info(`[plan ${cmdIndex}] module paths resolved: ${paths.join(', ')}`);
+          }
+        } catch {
+          core.info(`[plan ${cmdIndex}] output-module-groups not available — paths omitted from summary`);
+        }
       } else {
         core.info(`[cmd ${cmdIndex}] ${cmd}`);
         await this.execCommands([cmd], this._effectiveTools(stage));
@@ -81,8 +102,19 @@ export class PlanStage extends AbstractBranchStage {
     // ── Phase 2: parse JSONL → per-account files ───────────────────────────
     // Each raw plan file is JSONL (one JSON object per module/account per line).
     // TerragruntUtils.getVarEnvIdFromPlan reads planJson.variables.env_id.value.
+    // Module paths (from output-module-groups) are threaded through so the summary
+    // can display them — mirrors TerragruntUtils.getFolderModule (moduleCount logic).
+    const allExtracted: ExtractedPlan[] = [];
     for (const cmdIndex of planIndices) {
-      extractor.extractPerAccountPlans(cmdIndex, fallbackAccount);
+      const modulePaths = modulePathsByCmd.get(cmdIndex);
+      const extracted = extractor.extractPerAccountPlans(cmdIndex, fallbackAccount, modulePaths);
+      allExtracted.push(...extracted);
+    }
+
+    // Build filePath → modulePath lookup for the summary writer.
+    const modulePathsMap: Record<string, string> = {};
+    for (const plan of allExtracted) {
+      if (plan.modulePath) modulePathsMap[plan.filePath] = plan.modulePath;
     }
 
     // ── Phase 3: collect valid plans and save to artifact ──────────────────
@@ -105,6 +137,7 @@ export class PlanStage extends AbstractBranchStage {
     await StageTransfer.saveByGlob(PlanArtifacts.BINARY, PlanGlobs.BINARY);
 
     // ── Phase 4: write resource change summary to GitHub Job Summary ───────────
-    await PlanSummary.writeSummaryForPlans(perAccountPlans);
+    // Module paths are passed so each plan heading shows its source directory.
+    await PlanSummary.writeSummaryForPlans(perAccountPlans, modulePathsMap);
   }
 }

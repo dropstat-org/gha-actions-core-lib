@@ -193,6 +193,26 @@ describe('PlanSummary.toMarkdown', () => {
     }));
     expect(md).toContain('destructive');
   });
+
+  it('renders module path when present', () => {
+    const md = PlanSummary.toMarkdown(makeResult({ modulePath: '/live/network/hub/vpc' }));
+    expect(md).toContain('/live/network/hub/vpc');
+    expect(md).toContain('📁');
+    expect(md).toContain('Module path:');
+  });
+
+  it('does not render module path section when absent', () => {
+    const md = PlanSummary.toMarkdown(makeResult());
+    expect(md).not.toContain('📁');
+    expect(md).not.toContain('Module path:');
+  });
+
+  it('module path appears before the count table', () => {
+    const md = PlanSummary.toMarkdown(makeResult({ modulePath: '/live/network/hub/vpc' }));
+    const pathPos  = md.indexOf('/live/network/hub/vpc');
+    const tablePos = md.indexOf('| Action');
+    expect(pathPos).toBeLessThan(tablePos);
+  });
 });
 
 // ── writeSummaryForPlans ──────────────────────────────────────────────────────
@@ -248,5 +268,42 @@ describe('PlanSummary.writeSummaryForPlans', () => {
     // Only the valid file contributes to the summary
     expect(core.summary.addRaw).toHaveBeenCalledTimes(1);
     expect(core.summary.write).toHaveBeenCalledTimes(1);
+  });
+
+  it('injects module path from modulePathsMap into the rendered markdown', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(JSON.stringify({ resource_changes: [] }));
+
+    await PlanSummary.writeSummaryForPlans(
+      ['tfplan1-network-hub-vpc.json'],
+      { 'tfplan1-network-hub-vpc.json': '/live/network/hub/vpc' },
+    );
+
+    const rendered = (core.summary.addRaw as jest.Mock).mock.calls[0][0] as string;
+    expect(rendered).toContain('/live/network/hub/vpc');
+    expect(rendered).toContain('📁');
+  });
+
+  it('renders summary without module path when modulePathsMap is omitted', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(JSON.stringify({ resource_changes: [] }));
+
+    await PlanSummary.writeSummaryForPlans(['tfplan1-acct-d-01.json']);
+
+    const rendered = (core.summary.addRaw as jest.Mock).mock.calls[0][0] as string;
+    expect(rendered).not.toContain('📁');
+  });
+
+  it('renders summary without module path when file not in modulePathsMap', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(JSON.stringify({ resource_changes: [] }));
+
+    await PlanSummary.writeSummaryForPlans(
+      ['tfplan1-acct-d-01.json'],
+      { 'some-other-file.json': '/live/other' },
+    );
+
+    const rendered = (core.summary.addRaw as jest.Mock).mock.calls[0][0] as string;
+    expect(rendered).not.toContain('📁');
   });
 });
