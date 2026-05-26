@@ -28,7 +28,6 @@ jobs:
       deploy_enabled:      ${{ steps.ActionsCoreLib.outputs.deploy_enabled }}
       pre_deploy_enabled:  ${{ steps.ActionsCoreLib.outputs.pre_deploy_enabled }}
       post_deploy_enabled: ${{ steps.ActionsCoreLib.outputs.post_deploy_enabled }}
-      deploy_opa_enabled:  ${{ steps.ActionsCoreLib.outputs.deploy_opa_enabled }}
       deploy_environment:  ${{ steps.ActionsCoreLib.outputs.deploy_environment }}
       tools_terraform:     ${{ steps.ActionsCoreLib.outputs.tools_terraform }}
       tools_terragrunt:    ${{ steps.ActionsCoreLib.outputs.tools_terragrunt }}
@@ -184,20 +183,6 @@ jobs:
         with:
           stage: pre_deploy
 
-  deploy_opa:
-    name: Deploy OPA
-    needs: [config, pre_deploy]
-    if: |
-      always() &&
-      needs.config.outputs.deploy_opa_enabled == 'true' &&
-      needs.pre_deploy.result != 'failure'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dropstat-org/gha-actions-core-lib@main
-        with:
-          stage: deploy_opa
-
   # ── Terraform stages ────────────────────────────────────────────────────────
 
   plan:
@@ -242,13 +227,13 @@ jobs:
 
   deploy:
     name: Deploy
-    needs: [config, deploy_opa, plan]
+    needs: [config, pre_deploy, plan]
     # environment gate: uses deploy.environment from action.yaml (empty = no gate for app repos)
     environment: ${{ needs.config.outputs.deploy_environment }}
     if: |
       always() &&
       needs.config.outputs.deploy_enabled == 'true' &&
-      needs.deploy_opa.result != 'failure' &&
+      needs.pre_deploy.result != 'failure' &&
       (needs.plan.result == 'success' || needs.plan.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:

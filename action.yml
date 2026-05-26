@@ -4,7 +4,7 @@ author: 'dropstat'
 
 inputs:
   stage:
-    description: 'Stage a ejecutar (config | compile | unit_test | linter | sonarqube | trivy | checkov | publish | deploy | pre_deploy | post_deploy | deploy_opa | generic)'
+    description: 'Stage a ejecutar (config | compile | unit_test | linter | sonarqube | trivy | checkov | publish | deploy | pre_deploy | post_deploy | generic)'
     required: true
   config:
     description: 'Ruta al archivo action.yaml del repositorio'
@@ -36,8 +36,6 @@ outputs:
     description: 'true si el stage pre_deploy está habilitado'
   post_deploy_enabled:
     description: 'true si el stage post_deploy está habilitado'
-  deploy_opa_enabled:
-    description: 'true si el stage deploy_opa está habilitado'
   tools_java:
     description: 'Versión de Java configurada'
   tools_maven:
