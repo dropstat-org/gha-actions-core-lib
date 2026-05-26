@@ -208,6 +208,10 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TERRAGRUNT_NON_INTERACTIVE: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
@@ -251,6 +255,10 @@ jobs:
       id-token: write
       contents: read
       packages: write
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TERRAGRUNT_NON_INTERACTIVE: "true"
     steps:
       - uses: actions/checkout@v4
       # Solo para repos terraform — app repos no tienen AWS_ROLE_ARN ni necesitan OIDC aquí
