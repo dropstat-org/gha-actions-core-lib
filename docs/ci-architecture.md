@@ -164,11 +164,31 @@ The AWS OIDC role (`GitHubActions-PlatformInfra`) trusts tokens where:
 This means only pipelines running through this library can assume the role, even if someone
 adds a custom workflow to the consumer repo.
 
-### `permissions: id-token: write` must be in the CALLER
+### ALL 4 permissions must be in every caller `ci.yml`
 
-GitHub only grants `id-token` permissions to the job that declares it. When using reusable
-workflows, the **calling** `ci.yml` must declare `id-token: write` — the called workflow's
-job-level declarations alone are not sufficient.
+GitHub validates **all** job-level `permissions:` blocks in the called reusable workflow at
+**startup** — before any runner is provisioned — even for jobs that will be skipped at runtime
+for this repo type.
+
+For example, a terraform repo never runs `semgrep`, `trivy`, or `publish`. But `actions-core-lib.yml`
+declares `security-events: write` in the `semgrep`/`trivy` jobs and `packages: write` in the
+`publish`/`deploy` jobs. If the caller doesn't grant those, the entire workflow fails immediately
+with `startup_failure`.
+
+**Every consumer `ci.yml` must declare all four:**
+
+```yaml
+permissions:
+  id-token:        write    # OIDC tokens — plan/deploy jobs in called workflow
+  contents:        write    # release tags (use "read" if no release stage)
+  packages:        write    # publish/deploy jobs in called workflow
+  security-events: write    # semgrep/trivy SARIF upload in called workflow
+```
+
+### `gha-actions-core-lib` is public
+
+The library repo (`dropstat-org/gha-actions-core-lib`) is **public**. Consumer repos remain private.
+The library contains only CI pipeline logic — no secrets, no terraform configs, no business code.
 
 ---
 
@@ -185,11 +205,6 @@ python patch-ci-workflows.py --dry-run
 python patch-ci-workflows.py
 ```
 
-The script derives `permissions:` automatically from `action.yaml`:
-- `type: terraform` → adds `id-token: write`
-- `release` stage → `contents: write`; otherwise `contents: read`
-- `publish` stage → `packages: write`
-- `trivy` or `semgrep` stage → `security-events: write`
-
-After any change to the template (branch list, permissions logic, workflow ref), re-run the
-script to propagate to all repos in one shot.
+The script always generates all 4 permissions (only `contents:` varies: `write` for repos with
+a `release` stage or `type: terraform`, otherwise `read`). Run it after any template change to
+propagate to all repos.
