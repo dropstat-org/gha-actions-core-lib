@@ -1,5 +1,7 @@
 ﻿# dropstat ActionsCoreLib
 
+> **Distribution-only repo.** This repository contains the compiled bundle (`dist/bundle/index.js`) and reusable workflows only. The TypeScript source lives in the private repo `dropstat-org/gha-actions-core-lib-src`; bundles are built there and pushed here automatically on every merge to `main`.
+
 TypeScript GitHub Action que centraliza el CI/CD de todos los repositorios de la organización. Equivale a la Jenkins Shared Library (Groovy) pero para GitHub Actions.
 
 Los repositorios de la organización **no necesitan ningún workflow propio**. Solo declaran un archivo `action.yaml` en su raíz y el ActionsCoreLib se inyecta automáticamente vía [Required Workflows](#1-configurar-required-workflow-en-la-organización).
