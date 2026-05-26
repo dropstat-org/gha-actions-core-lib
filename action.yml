@@ -36,6 +36,8 @@ outputs:
     description: 'true si el stage pre_deploy está habilitado'
   post_deploy_enabled:
     description: 'true si el stage post_deploy está habilitado'
+  generic_enabled:
+    description: 'true si el stage generic está habilitado'
   tools_java:
     description: 'Versión de Java configurada'
   tools_maven:

@@ -28,6 +28,7 @@ jobs:
       deploy_enabled:      ${{ steps.ActionsCoreLib.outputs.deploy_enabled }}
       pre_deploy_enabled:  ${{ steps.ActionsCoreLib.outputs.pre_deploy_enabled }}
       post_deploy_enabled: ${{ steps.ActionsCoreLib.outputs.post_deploy_enabled }}
+      generic_enabled:     ${{ steps.ActionsCoreLib.outputs.generic_enabled }}
       deploy_environment:  ${{ steps.ActionsCoreLib.outputs.deploy_environment }}
       tools_terraform:     ${{ steps.ActionsCoreLib.outputs.tools_terraform }}
       tools_terragrunt:    ${{ steps.ActionsCoreLib.outputs.tools_terragrunt }}
@@ -182,6 +183,17 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: pre_deploy
+
+  generic:
+    name: Generic
+    needs: config
+    if: needs.config.outputs.generic_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: generic
 
   # ── Terraform stages ────────────────────────────────────────────────────────
 
