@@ -13,7 +13,7 @@ inputs:
   platform-config-repo:
     description: 'Nombre del repositorio de configuración dentro de la organización. Por defecto usa GITHUB_REPOSITORY_OWNER como org y gha-platform-config como repo.'
     required: false
-    default: 'gha-actions-config'
+    default: 'gha-platform-config'
 
 outputs:
   compile_enabled:

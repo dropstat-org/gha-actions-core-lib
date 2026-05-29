@@ -22,14 +22,14 @@ runs:
   using: composite
   steps:
     - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: aws-actions/configure-aws-credentials@v4.1.0
       with:
         role-to-assume: ${{ inputs.aws-role-arn }}
         aws-region: ${{ inputs.aws-region }}
         role-session-name: ${{ inputs.session-name }}-${{ github.run_id }}
 
     - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
+      uses: hashicorp/setup-terraform@v3.1.2
       with:
         terraform_version: ${{ inputs.terraform-version }}
         terraform_wrapper: false  # wrapper breaks terragrunt output parsing
@@ -51,7 +51,7 @@ runs:
         echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
 
     - name: Cache Terraform providers
-      uses: actions/cache@v4
+      uses: actions/cache@v4.2.3
       with:
         path: ~/.terraform.d/plugin-cache
         key: ${{ runner.os }}-tf-providers-${{ hashFiles('**/.terraform.lock.hcl') }}

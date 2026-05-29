@@ -23,7 +23,7 @@ jobs:
       tools_terraform:     ${{ steps.cfg.outputs.tools_terraform }}
       tools_terragrunt:    ${{ steps.cfg.outputs.tools_terragrunt }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - id: cfg
         uses: dropstat-org/gha-actions-core-lib@main
         with:
@@ -35,7 +35,7 @@ jobs:
     if: needs.config.outputs.plan_enabled == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
@@ -45,19 +45,6 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: plan
-      - name: Install tfcost
-        run: |
-          curl -sSfL \
-            "https://github.com/eco-ci/tfcost/releases/latest/download/tfcost_linux_amd64.tar.gz" \
-            | tar -xz -C /usr/local/bin tfcost
-          chmod +x /usr/local/bin/tfcost
-      - name: Run tfcost
-        run: |
-          echo "## Cost Estimate" >> "$GITHUB_STEP_SUMMARY"
-          for plan_file in tfplan*.json; do
-            echo "### $plan_file" >> "$GITHUB_STEP_SUMMARY"
-            tfcost plan "$plan_file" >> "$GITHUB_STEP_SUMMARY"
-          done
 
   checkov_tf:
     name: Checkov Terraform
@@ -68,7 +55,7 @@ jobs:
       needs.plan.result != 'failure'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: checkov_tf
@@ -96,7 +83,7 @@ jobs:
       needs.approve.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
@@ -116,7 +103,7 @@ jobs:
       needs.deploy.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: release
