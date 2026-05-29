@@ -42,6 +42,29 @@ El campo `summary` escribe el output del plan al **GitHub Job Summary** del run,
 
 ---
 
+### `tfcost`
+
+Estima el costo de los recursos declarados en el plan. Corre automáticamente al final del stage `plan`, sobre los archivos JSON que éste genera — sin re-ejecutar ningún comando de Terraform.
+
+No requiere API key ni registro. Usa [tfcost](https://github.com/eco-ci/tfcost), una herramienta open source que calcula costos a partir de precios públicos de AWS.
+
+El reporte se escribe en el **GitHub Job Summary**, a continuación del resumen de recursos del plan:
+
+```
+[Recursos a crear / modificar / destruir]   ← emitido por stage: plan
+## Cost Estimate
+### tfplan0-123456789012.json
+...
+### tfplan1-987654321098.json
+...
+```
+
+Para proyectos con `terragrunt run-all plan`, la lib genera un archivo JSON por módulo/cuenta (`tfplan0-<account>.json`, `tfplan1-<account>.json`, …). tfcost itera sobre todos ellos automáticamente.
+
+> **Habilitado por defecto** — no requiere configuración en el `action.yaml` del proyecto.
+
+---
+
 ### `checkov`
 
 Escanea el plan JSON con Checkov en lugar de escanear el directorio. Requiere que el stage `plan` haya generado `tfplan.json` previamente en el mismo runner.

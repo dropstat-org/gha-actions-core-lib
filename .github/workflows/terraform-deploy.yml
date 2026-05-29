@@ -15,13 +15,13 @@ jobs:
     name: Config
     runs-on: ubuntu-latest
     outputs:
-      plan_enabled:       ${{ steps.cfg.outputs.plan_enabled }}
-      checkov_tf_enabled: ${{ steps.cfg.outputs.checkov_tf_enabled }}
-      deploy_enabled:     ${{ steps.cfg.outputs.deploy_enabled }}
-      release_enabled:    ${{ steps.cfg.outputs.release_enabled }}
-      deploy_environment: ${{ steps.cfg.outputs.deploy_environment }}
-      tools_terraform:    ${{ steps.cfg.outputs.tools_terraform }}
-      tools_terragrunt:   ${{ steps.cfg.outputs.tools_terragrunt }}
+      plan_enabled:        ${{ steps.cfg.outputs.plan_enabled }}
+      checkov_tf_enabled:  ${{ steps.cfg.outputs.checkov_tf_enabled }}
+      deploy_enabled:      ${{ steps.cfg.outputs.deploy_enabled }}
+      release_enabled:     ${{ steps.cfg.outputs.release_enabled }}
+      deploy_environment:  ${{ steps.cfg.outputs.deploy_environment }}
+      tools_terraform:     ${{ steps.cfg.outputs.tools_terraform }}
+      tools_terragrunt:    ${{ steps.cfg.outputs.tools_terragrunt }}
     steps:
       - uses: actions/checkout@v4
       - id: cfg
@@ -45,6 +45,19 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: plan
+      - name: Install tfcost
+        run: |
+          curl -sSfL \
+            "https://github.com/eco-ci/tfcost/releases/latest/download/tfcost_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin tfcost
+          chmod +x /usr/local/bin/tfcost
+      - name: Run tfcost
+        run: |
+          echo "## Cost Estimate" >> "$GITHUB_STEP_SUMMARY"
+          for plan_file in tfplan*.json; do
+            echo "### $plan_file" >> "$GITHUB_STEP_SUMMARY"
+            tfcost plan "$plan_file" >> "$GITHUB_STEP_SUMMARY"
+          done
 
   checkov_tf:
     name: Checkov Terraform
