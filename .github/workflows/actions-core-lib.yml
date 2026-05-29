@@ -34,7 +34,7 @@ jobs:
       tools_terragrunt:    ${{ steps.ActionsCoreLib.outputs.tools_terragrunt }}
       ActionsCoreLib_type: ${{ steps.ActionsCoreLib.outputs.ActionsCoreLib_type }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - id: ActionsCoreLib
         uses: dropstat-org/gha-actions-core-lib@main
         with:
@@ -48,7 +48,7 @@ jobs:
     if: needs.config.outputs.compile_enabled == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: compile
@@ -62,7 +62,7 @@ jobs:
       needs.compile.result != 'failure'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: unit_test
@@ -76,7 +76,7 @@ jobs:
       needs.compile.result != 'failure'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: linter
@@ -93,7 +93,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: semgrep
@@ -109,7 +109,7 @@ jobs:
       needs.compile.result != 'failure'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: sonarqube
@@ -129,7 +129,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: trivy
@@ -140,7 +140,7 @@ jobs:
     if: needs.config.outputs.checkov_enabled == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: checkov
@@ -161,7 +161,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: publish
@@ -179,7 +179,7 @@ jobs:
       needs.publish.result != 'failure'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: pre_deploy
@@ -190,7 +190,7 @@ jobs:
     if: needs.config.outputs.generic_enabled == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: generic
@@ -205,18 +205,14 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    env:
-      TF_IN_AUTOMATION: "true"
-      TF_INPUT: "false"
-      TERRAGRUNT_NON_INTERACTIVE: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2.2.2
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-plan
-          terraform-version: ${{ needs.config.outputs.tools_terraform || '1.7.5' }}
-          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt || '0.55.18' }}
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: plan
@@ -230,7 +226,7 @@ jobs:
       needs.plan.result != 'failure'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: checkov_tf
@@ -252,12 +248,8 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    env:
-      TF_IN_AUTOMATION: "true"
-      TF_INPUT: "false"
-      TERRAGRUNT_NON_INTERACTIVE: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2.2.2
       # Solo para repos terraform — app repos no tienen AWS_ROLE_ARN ni necesitan OIDC aquí
       - name: Setup Terraform + AWS
         if: needs.config.outputs.plan_enabled == 'true'
@@ -265,8 +257,8 @@ jobs:
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-deploy
-          terraform-version: ${{ needs.config.outputs.tools_terraform || '1.7.5' }}
-          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt || '0.55.18' }}
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: deploy
@@ -283,7 +275,7 @@ jobs:
       needs.deploy.result != 'failure'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: post_deploy
@@ -299,7 +291,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: release

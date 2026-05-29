@@ -40,8 +40,8 @@ jobs:
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-CD-plan
-          terraform-version: ${{ needs.config.outputs.tools_terraform || '1.7.5' }}
-          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt || '0.55.18' }}
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: plan
@@ -88,8 +88,8 @@ jobs:
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-CD-deploy
-          terraform-version: ${{ needs.config.outputs.tools_terraform || '1.7.5' }}
-          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt || '0.55.18' }}
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: deploy
