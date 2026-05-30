@@ -206,7 +206,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4.2.2.2.2
+      - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
@@ -249,7 +249,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4.2.2.2.2
+      - uses: actions/checkout@v4.2.2
       # Solo para repos terraform — app repos no tienen AWS_ROLE_ARN ni necesitan OIDC aquí
       - name: Setup Terraform + AWS
         if: needs.config.outputs.plan_enabled == 'true'
