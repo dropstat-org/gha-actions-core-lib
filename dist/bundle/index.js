@@ -2325,6 +2325,7 @@ const PlanExtractor_1 = __nccwpck_require__(56078);
 const StageTransfer_1 = __nccwpck_require__(24734);
 const PlanSummary_1 = __nccwpck_require__(60566);
 const PlanSecurity_1 = __nccwpck_require__(87142);
+const TerraformStateCollector_1 = __nccwpck_require__(18159);
 // Subcommands that are never allowed inside a plan stage.
 const FORBIDDEN_SUBCOMMANDS = ['apply', 'destroy', 'force-unlock'];
 function containsSubcommand(cmd, sub) {
@@ -2446,7 +2447,9 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
         await this.runTfcost(perAccountPlans);
     }
     // ── Cost estimation via OpenInfraQuote ────────────────────────────────────
-    // Open-source, no API key, no registration required.
+    // Estimates cost from:
+    //   1. Plan files  → resources about to be created/changed
+    //   2. State files → resources already deployed (current infra cost)
     // Ref: https://github.com/terrateamio/openinfraquote
     async runTfcost(planFiles) {
         if (planFiles.length === 0)
@@ -2469,28 +2472,49 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
             await exec.exec('bash', ['-c',
                 'curl -sSfL https://oiq.terrateam.io/prices.csv.gz | gunzip > /tmp/oiq-prices.csv',
             ]);
-            // Run estimate: oiq v1.10+ uses a two-step pipeline
-            //   oiq match --pricesheet prices.csv plan.json | oiq price --region us-east-2
-            // Run across all plan files (pass each file to match, pipe to price).
+            const fsModule = await Promise.resolve().then(() => __importStar(__nccwpck_require__(79896)));
+            const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+            const lines = ['## 💰 Cost Estimate'];
+            // ── Part 1: cost of pending plan changes ──────────────────────────────
             const planFileArgs = planFiles.join(' ');
-            const { stdout, stderr } = await exec.getExecOutput('bash', ['-c',
+            const { stdout: planOut } = await exec.getExecOutput('bash', ['-c',
                 `oiq match --pricesheet /tmp/oiq-prices.csv ${planFileArgs} | oiq price --region us-east-2`
             ], { ignoreReturnCode: true, silent: true });
-            const output = stdout.trim() || stderr.trim();
-            const fs = await Promise.resolve().then(() => __importStar(__nccwpck_require__(79896)));
-            const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-            if (summaryPath) {
-                const lines = ['## 💰 Cost Estimate'];
-                if (output) {
+            if (planOut.trim()) {
+                lines.push('### 🔄 Pending Changes');
+                lines.push('```');
+                lines.push(planOut.trim());
+                lines.push('```');
+                lines.push(`> From ${planFiles.length} plan file(s)`);
+            }
+            else {
+                lines.push('### 🔄 Pending Changes');
+                lines.push('> No priceable resources in this plan (IAM, SSO, Organizations have no hourly cost).');
+            }
+            // ── Part 2: cost of already-deployed infrastructure (from state) ──────
+            core.info('[openinfraquote] collecting module states for current infra cost...');
+            const stateFiles = await TerraformStateCollector_1.TerraformStateCollector.collect();
+            if (stateFiles.length > 0) {
+                const stateFileArgs = stateFiles.map(s => s.filePath).join(' ');
+                const { stdout: stateOut } = await exec.getExecOutput('bash', ['-c',
+                    `oiq match --pricesheet /tmp/oiq-prices.csv ${stateFileArgs} | oiq price --region us-east-2`
+                ], { ignoreReturnCode: true, silent: true });
+                lines.push('');
+                lines.push('### 🏗️ Current Deployed Infrastructure');
+                if (stateOut.trim()) {
                     lines.push('```');
-                    lines.push(output);
+                    lines.push(stateOut.trim());
                     lines.push('```');
-                    lines.push(`> Estimated from ${planFiles.length} plan file(s) · [OpenInfraQuote](https://github.com/terrateamio/openinfraquote)`);
+                    lines.push(`> From ${stateFiles.length} module state(s): ${stateFiles.map(s => s.modulePath.split('/').slice(-2).join('/')).join(', ')}`);
                 }
                 else {
-                    lines.push('> No priceable resources found in this plan (IAM, Organizations, SSO and similar services have no hourly cost).');
+                    lines.push('> No priceable resources found in current state.');
                 }
-                fs.appendFileSync(summaryPath, lines.join('\n') + '\n');
+            }
+            lines.push('');
+            lines.push(`> [OpenInfraQuote](https://github.com/terrateamio/openinfraquote)`);
+            if (summaryPath) {
+                fsModule.appendFileSync(summaryPath, lines.join('\n') + '\n');
                 core.info(`[openinfraquote] cost estimate written to Job Summary`);
             }
         }
@@ -5112,6 +5136,191 @@ class SummaryWriter {
 }
 exports.SummaryWriter = SummaryWriter;
 //# sourceMappingURL=SummaryWriter.js.map
+
+/***/ }),
+
+/***/ 18159:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TerraformStateCollector = void 0;
+const exec = __importStar(__nccwpck_require__(95236));
+const fs = __importStar(__nccwpck_require__(79896));
+const path = __importStar(__nccwpck_require__(16928));
+const Logger_1 = __nccwpck_require__(26747);
+/**
+ * Discovers all Terragrunt modules in a working directory and pulls
+ * their Terraform state as JSON (via `terraform show -json`), writing
+ * each to a temp file.
+ *
+ * Works regardless of how modules are nested — uses `terragrunt find`
+ * (v1.0) to enumerate all units, then runs `terraform show -json` in
+ * each module's Terragrunt cache directory.
+ *
+ * Usage:
+ *   const files = await TerraformStateCollector.collect('live/dev');
+ *   // files[i].filePath → /tmp/state-0.json, /tmp/state-1.json, …
+ */
+class TerraformStateCollector {
+    /**
+     * Discovers all modules under workingDir, pulls each state and writes
+     * it to a temp JSON file.  Returns only the files that had state
+     * (empty/unapplied modules are silently skipped).
+     */
+    static async collect(workingDir) {
+        const modules = await this.discoverModules(workingDir);
+        if (modules.length === 0) {
+            Logger_1.Logger.warn('[StateCollector] no modules found — skipping state collection');
+            return [];
+        }
+        Logger_1.Logger.info(`[StateCollector] found ${modules.length} module(s), pulling state…`);
+        const results = [];
+        let idx = 0;
+        for (const modulePath of modules) {
+            const outFile = `/tmp/tg-state-${idx}.json`;
+            const ok = await this.pullModuleState(modulePath, outFile);
+            if (ok) {
+                results.push({ modulePath, filePath: outFile });
+                Logger_1.Logger.info(`[StateCollector] state pulled → ${path.basename(modulePath)} → ${outFile}`);
+                idx++;
+            }
+        }
+        Logger_1.Logger.info(`[StateCollector] ${results.length}/${modules.length} modules have state`);
+        return results;
+    }
+    // ── Private helpers ────────────────────────────────────────────────────────
+    /**
+     * Uses `terragrunt find --json` (v1.0) to enumerate all unit paths.
+     * Falls back to directory discovery if find is unavailable.
+     */
+    static async discoverModules(workingDir) {
+        let stdout = '';
+        const opts = {
+            ignoreReturnCode: true,
+            silent: true,
+            listeners: { stdout: (d) => { stdout += d.toString(); } },
+        };
+        if (workingDir)
+            opts.cwd = workingDir;
+        // v1.0: terragrunt find --json lists all units with their paths
+        await exec.exec('bash', ['-c', 'terragrunt find --json 2>/dev/null'], opts);
+        if (stdout.trim()) {
+            try {
+                // Output format: [{ "path": "...", ... }, ...]
+                const units = JSON.parse(stdout.trim());
+                const cwd = workingDir ? path.resolve(workingDir) : process.cwd();
+                return units
+                    .map(u => u.path ?? u.dir ?? '')
+                    .filter(Boolean)
+                    .map(p => path.isAbsolute(p) ? p : path.join(cwd, p));
+            }
+            catch {
+                Logger_1.Logger.warn('[StateCollector] could not parse terragrunt find --json output');
+            }
+        }
+        // Fallback: scan for terragrunt.hcl files
+        return this.scanForModules(workingDir ?? '.');
+    }
+    /**
+     * Fallback: recursively find directories containing terragrunt.hcl
+     * (excluding .terragrunt-cache and hidden directories).
+     */
+    static scanForModules(rootDir) {
+        const results = [];
+        const scan = (dir) => {
+            let entries;
+            try {
+                entries = fs.readdirSync(dir, { withFileTypes: true });
+            }
+            catch {
+                return;
+            }
+            const hasHcl = entries.some(e => e.isFile() && e.name === 'terragrunt.hcl');
+            if (hasHcl)
+                results.push(dir);
+            for (const e of entries) {
+                if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
+                    scan(path.join(dir, e.name));
+                }
+            }
+        };
+        scan(path.resolve(rootDir));
+        return results;
+    }
+    /**
+     * Runs `terragrunt show -json` (or `terraform show -json`) inside
+     * a module directory to extract its current state as JSON.
+     * Returns true if state was pulled and written successfully.
+     */
+    static async pullModuleState(modulePath, outFile) {
+        let stdout = '';
+        const opts = {
+            cwd: modulePath,
+            ignoreReturnCode: true,
+            silent: true,
+            listeners: {
+                stdout: (d) => { stdout += d.toString(); },
+            },
+        };
+        // Try `terragrunt show -json` first (reads from Terragrunt cache),
+        // then fall back to plain `terraform show -json` for raw TF dirs.
+        await exec.exec('bash', ['-c',
+            'terragrunt show -- -json 2>/dev/null || terraform show -json 2>/dev/null'
+        ], opts);
+        const json = stdout.trim();
+        if (!json || !json.startsWith('{'))
+            return false;
+        // Check that the state actually has resources (not empty state)
+        try {
+            const parsed = JSON.parse(json);
+            const resources = parsed?.values?.root_module?.resources ?? [];
+            if (resources.length === 0)
+                return false;
+        }
+        catch {
+            return false;
+        }
+        fs.writeFileSync(outFile, json, 'utf8');
+        return true;
+    }
+}
+exports.TerraformStateCollector = TerraformStateCollector;
+//# sourceMappingURL=TerraformStateCollector.js.map
 
 /***/ }),
 
