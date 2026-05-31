@@ -4292,8 +4292,7 @@ class PlanExtractor {
     buildModuleGroupsCommand(cmd) {
         const { workingDir } = PlanExtractor.parseFlags(cmd);
         const wd = workingDir ? ` --working-dir ${workingDir}` : '';
-        // v1.0: output-module-groups → find --dag --json (with working-dir support)
-        return `terragrunt${wd} find --dag --json 2>/dev/null || terragrunt output-module-groups${wd} 2>/dev/null`;
+        return `terragrunt${wd} find --dag --json 2>/dev/null`;
     }
     // ── Plan parsing ──────────────────────────────────────────────────────────
     /**
