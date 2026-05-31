@@ -4286,8 +4286,10 @@ class PlanExtractor {
         // v1.0: Terraform flags separated from Terragrunt flags with --
         const planCmd = `${cleanCmd} -- --out ${binary}`;
         // v1.0: show command — Terragrunt global flags before run-all, terraform flags after --
+        // --queue-ignore-errors: if a module fails during show (e.g. dependency not applied yet),
+        // continue collecting JSON from the other modules that succeeded.
         const showCmd = runAll
-            ? `terragrunt${globalPrefix} run --all show -- -json ${binary} > ${json}`
+            ? `terragrunt${globalPrefix} run --all --queue-ignore-errors show -- -json ${binary} > ${json}`
             : `terragrunt show -- -json ${binary} > ${json}`;
         return [planCmd, showCmd];
     }
