@@ -2472,7 +2472,7 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
             // Run estimate across all plan files in one call for a consolidated report.
             // oiq accepts multiple plan files — merges them into a single cost table.
             // Also capture stderr: oiq writes its table to stdout, errors to stderr.
-            const { stdout, stderr } = await exec.getExecOutput('oiq', ['estimate', '--prices', '/tmp/oiq-prices.csv', ...planFiles], { ignoreReturnCode: true, silent: true });
+            const { stdout, stderr } = await exec.getExecOutput('oiq', ['price', '--prices', '/tmp/oiq-prices.csv', ...planFiles], { ignoreReturnCode: true, silent: true });
             const output = stdout.trim() || stderr.trim();
             const fs = await Promise.resolve().then(() => __importStar(__nccwpck_require__(79896)));
             const summaryPath = process.env.GITHUB_STEP_SUMMARY;
