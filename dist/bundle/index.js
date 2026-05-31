@@ -2449,6 +2449,66 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
         // Ref: https://github.com/eco-ci/tfcost
         await this.runTfcost(perAccountPlans);
     }
+    // ── Cost report builder ───────────────────────────────────────────────────
+    // Parses oiq JSON output and generates a markdown report.
+    // Filters out usage-based resources (S3, CloudWatch) whose estimates rely on
+    // unreliable default assumptions — these show wildly inflated costs for empty
+    // buckets/log groups. Only hourly-priced resources (EC2, RDS, NAT GW, etc.)
+    // have reliable estimates from static analysis.
+    buildCostReport(jsonOut, count, unit) {
+        const USAGE_BASED_TYPES = [
+            'aws_s3_bucket',
+            'aws_cloudwatch_log_group',
+            'aws_cloudwatch_log_stream',
+            'aws_s3_object',
+        ];
+        if (!jsonOut.trim()) {
+            return ['> No priceable resources found (IAM, SCPs, Organizations, SSO have no hourly cost).'];
+        }
+        try {
+            const report = JSON.parse(jsonOut.trim());
+            const added = (report.added ?? []).filter((r) => !USAGE_BASED_TYPES.some(t => r.resource?.includes(t)));
+            const removed = (report.removed ?? []).filter((r) => !USAGE_BASED_TYPES.some(t => r.resource?.includes(t)));
+            const unchanged = (report.unchanged ?? []).filter((r) => !USAGE_BASED_TYPES.some(t => r.resource?.includes(t)));
+            const fmt = (n) => `$${n.toFixed(2)}`;
+            const addedTotal = added.reduce((s, r) => s + (r.monthly_cost ?? 0), 0);
+            const removedTotal = removed.reduce((s, r) => s + (r.monthly_cost ?? 0), 0);
+            const lines = [];
+            if (added.length === 0 && removed.length === 0 && unchanged.length === 0) {
+                lines.push('> No hourly-priced resources found. S3/CloudWatch excluded (usage-based pricing).');
+                lines.push(`> From ${count} ${unit}(s)`);
+                return lines;
+            }
+            lines.push('```');
+            if (added.length > 0) {
+                lines.push(`🟢 Added: ${fmt(addedTotal)}/mo`);
+                for (const r of added)
+                    lines.push(`  + ${r.resource.padEnd(55)} ${fmt(r.monthly_cost ?? 0)}/mo`);
+            }
+            if (removed.length > 0) {
+                lines.push(`🔴 Removed: ${fmt(removedTotal)}/mo`);
+                for (const r of removed)
+                    lines.push(`  - ${r.resource.padEnd(55)} ${fmt(r.monthly_cost ?? 0)}/mo`);
+            }
+            if (unchanged.length > 0) {
+                const unchangedTotal = unchanged.reduce((s, r) => s + (r.monthly_cost ?? 0), 0);
+                lines.push(`⚪ Existing: ${fmt(unchangedTotal)}/mo`);
+                for (const r of unchanged)
+                    lines.push(`    ${r.resource.padEnd(55)} ${fmt(r.monthly_cost ?? 0)}/mo`);
+            }
+            const netDiff = addedTotal - removedTotal;
+            if (netDiff !== 0)
+                lines.push(`Net change: ${netDiff >= 0 ? '+' : ''}${fmt(netDiff)}/mo`);
+            lines.push('```');
+            lines.push(`> From ${count} ${unit}(s) · S3/CloudWatch excluded (usage-based, unreliable without real data)`);
+            return lines;
+        }
+        catch {
+            // JSON parse failed — fall back to raw text
+            return ['```', jsonOut.trim().split('\n').slice(0, 20).join('\n'), '```',
+                `> From ${count} ${unit}(s)`];
+        }
+    }
     // ── Cost estimation via OpenInfraQuote ────────────────────────────────────
     // Estimates cost from:
     //   1. Plan files  → resources about to be created/changed
@@ -2478,40 +2538,28 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
             const fsModule = await Promise.resolve().then(() => __importStar(__nccwpck_require__(79896)));
             const summaryPath = process.env.GITHUB_STEP_SUMMARY;
             const lines = ['## 💰 Cost Estimate'];
-            // ── Part 1: cost of pending plan changes ──────────────────────────────
+            // ── Part 1: cost of pending plan changes (JSON → filtered report) ───────
             const planFileArgs = planFiles.join(' ');
-            const { stdout: planOut } = await exec.getExecOutput('bash', ['-c',
-                `oiq match --pricesheet /tmp/oiq-prices.csv ${planFileArgs} | oiq price --region us-east-2`
+            const { stdout: planJson } = await exec.getExecOutput('bash', ['-c',
+                `oiq match --pricesheet /tmp/oiq-prices.csv ${planFileArgs} | oiq price --region us-east-2 --format=json`
             ], { ignoreReturnCode: true, silent: true });
-            if (planOut.trim()) {
-                lines.push('### 🔄 Pending Changes');
-                lines.push('```');
-                lines.push(planOut.trim());
-                lines.push('```');
-                lines.push(`> From ${planFiles.length} plan file(s)`);
-            }
-            else {
-                lines.push('### 🔄 Pending Changes');
-                lines.push('> No priceable resources in this plan (IAM, SSO, Organizations have no hourly cost).');
-            }
+            lines.push('### 🔄 Pending Changes');
+            const planReport = this.buildCostReport(planJson, planFiles.length, 'plan file');
+            lines.push(...planReport);
             // ── Part 2: cost of already-deployed infrastructure (from state) ──────
             core.info('[openinfraquote] collecting module states for current infra cost...');
             const stateFiles = await TerraformStateCollector_1.TerraformStateCollector.collect();
             if (stateFiles.length > 0) {
                 const stateFileArgs = stateFiles.map(s => s.filePath).join(' ');
-                const { stdout: stateOut } = await exec.getExecOutput('bash', ['-c',
-                    `oiq match --pricesheet /tmp/oiq-prices.csv ${stateFileArgs} | oiq price --region us-east-2`
+                const { stdout: stateJson } = await exec.getExecOutput('bash', ['-c',
+                    `oiq match --pricesheet /tmp/oiq-prices.csv ${stateFileArgs} | oiq price --region us-east-2 --format=json`
                 ], { ignoreReturnCode: true, silent: true });
                 lines.push('');
                 lines.push('### 🏗️ Current Deployed Infrastructure');
-                if (stateOut.trim()) {
-                    lines.push('```');
-                    lines.push(stateOut.trim());
-                    lines.push('```');
-                    lines.push(`> From ${stateFiles.length} module state(s): ${stateFiles.map(s => s.modulePath.split('/').slice(-2).join('/')).join(', ')}`);
-                }
-                else {
-                    lines.push('> No priceable resources found in current state.');
+                const stateReport = this.buildCostReport(stateJson, stateFiles.length, 'module state');
+                lines.push(...stateReport);
+                if (stateFiles.length > 0) {
+                    lines.push(`> Modules: ${stateFiles.map(s => s.modulePath.split('/').slice(-2).join('/')).join(', ')}`);
                 }
             }
             lines.push('');
