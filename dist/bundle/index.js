@@ -2201,6 +2201,7 @@ class DeployStage extends AbstractDeployStage_1.AbstractDeployStage {
             core.exportVariable('TF_IN_AUTOMATION', 'true');
             core.exportVariable('TF_INPUT', 'false');
             core.exportVariable('TERRAGRUNT_NON_INTERACTIVE', 'true');
+            core.exportVariable('TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE', 'true');
         }
         if (!stage.deploy) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_DEPLOY_ENV, `Stage '${stage.name}' requires deploy config`);
@@ -2345,6 +2346,10 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
         core.exportVariable('TF_IN_AUTOMATION', 'true');
         core.exportVariable('TF_INPUT', 'false');
         core.exportVariable('TERRAGRUNT_NON_INTERACTIVE', 'true');
+        // Allow plugin cache even when checksums differ from lock file.
+        // Prevents "cached package does not match lock file" errors when modules
+        // were initialized on a different platform (e.g. Windows dev → Linux CI).
+        core.exportVariable('TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE', 'true');
         const commands = stage.commands ?? [];
         if (commands.length === 0) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Plan stage '${stage.name}' requires at least one command`);
@@ -4196,11 +4201,12 @@ const path = __importStar(__nccwpck_require__(16928));
 /**
  * Ports the plan-extraction logic from Groovy PreDeployStage.
  *
- * Covers three command shapes:
+ * Covers Terragrunt v1.0+ command shapes (old --terragrunt-* flags also supported):
  *   terragrunt plan
  *   terragrunt run-all plan
- *   terragrunt plan --terragrunt-working-dir <dir>
- *   terragrunt run-all plan --terragrunt-working-dir <dir>
+ *   terragrunt --working-dir <dir> run-all plan
+ *   terragrunt run-all plan --working-dir <dir>
+ *   (legacy) terragrunt run-all plan --terragrunt-working-dir <dir>
  */
 class PlanExtractor {
     projectId;
@@ -4224,8 +4230,12 @@ class PlanExtractor {
      */
     static parseFlags(cmd) {
         const args = cmd.trim().split(/\s+/);
-        const runAll = args.includes('run-all');
-        const wdIdx = args.indexOf('--terragrunt-working-dir');
+        // v1.0: run --all is equivalent to run-all
+        const runAll = args.includes('run-all') || (args.includes('run') && args.includes('--all'));
+        // Support both v1.0 (--working-dir) and legacy (--terragrunt-working-dir)
+        const wdIdx = args.indexOf('--working-dir') !== -1
+            ? args.indexOf('--working-dir')
+            : args.indexOf('--terragrunt-working-dir');
         const workingDir = wdIdx !== -1 ? (args[wdIdx + 1] ?? null) : null;
         return { runAll, workingDir };
     }
@@ -4264,11 +4274,11 @@ class PlanExtractor {
         const binary = this.rawBinaryName(cmdIndex);
         const json = this.rawJsonName(cmdIndex);
         const ra = runAll ? 'run-all ' : '';
-        const wd = workingDir ? ` --terragrunt-working-dir ${workingDir}` : '';
+        const wd = workingDir ? ` --working-dir ${workingDir}` : '';
         // Strip any user-supplied -out / --out so we control the output filename.
         // Handles both forms: --out=file  and  --out file
         const cleanCmd = cmd.replace(/\s+-{1,2}out(?:=\S+|\s+\S+)/g, '').trimEnd();
-        const ni = runAll ? ' --terragrunt-non-interactive' : '';
+        const ni = runAll ? ' --non-interactive' : '';
         const planCmd = `${cleanCmd} --out ${binary}`;
         const showCmd = `terragrunt ${ra}show -json ${binary}${ni}${wd} > ${json}`;
         return [planCmd, showCmd];
@@ -4279,8 +4289,9 @@ class PlanExtractor {
      */
     buildModuleGroupsCommand(cmd) {
         const { workingDir } = PlanExtractor.parseFlags(cmd);
-        const wd = workingDir ? ` --terragrunt-working-dir ${workingDir}` : '';
-        return `terragrunt output-module-groups${wd} 2>/dev/null`;
+        const wd = workingDir ? ` --working-dir ${workingDir}` : '';
+        // v1.0: output-module-groups → find --dag --json (with working-dir support)
+        return `terragrunt${wd} find --dag --json 2>/dev/null || terragrunt output-module-groups${wd} 2>/dev/null`;
     }
     // ── Plan parsing ──────────────────────────────────────────────────────────
     /**
@@ -139915,24 +139926,6 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
-
-/***/ }),
-
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -150259,132 +150252,6 @@ exports.listType = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -153600,6 +153467,132 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -153670,6 +153663,24 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
+
+/***/ }),
+
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
