@@ -2469,10 +2469,13 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
             await exec.exec('bash', ['-c',
                 'curl -sSfL https://oiq.terrateam.io/prices.csv.gz | gunzip > /tmp/oiq-prices.csv',
             ]);
-            // Run estimate across all plan files in one call for a consolidated report.
-            // oiq accepts multiple plan files — merges them into a single cost table.
-            // Also capture stderr: oiq writes its table to stdout, errors to stderr.
-            const { stdout, stderr } = await exec.getExecOutput('oiq', ['price', '--prices', '/tmp/oiq-prices.csv', ...planFiles], { ignoreReturnCode: true, silent: true });
+            // Run estimate: oiq v1.10+ uses a two-step pipeline
+            //   oiq match --pricesheet prices.csv plan.json | oiq price --region us-east-2
+            // Run across all plan files (pass each file to match, pipe to price).
+            const planFileArgs = planFiles.join(' ');
+            const { stdout, stderr } = await exec.getExecOutput('bash', ['-c',
+                `oiq match --pricesheet /tmp/oiq-prices.csv ${planFileArgs} | oiq price --region us-east-2`
+            ], { ignoreReturnCode: true, silent: true });
             const output = stdout.trim() || stderr.trim();
             const fs = await Promise.resolve().then(() => __importStar(__nccwpck_require__(79896)));
             const summaryPath = process.env.GITHUB_STEP_SUMMARY;
