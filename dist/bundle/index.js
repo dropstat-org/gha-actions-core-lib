@@ -5407,8 +5407,9 @@ const BUILD_STAGES = [
     { name: StageName_1.StageName.SEMGREP, required: false },
     { name: StageName_1.StageName.SONARQUBE, required: false },
     { name: StageName_1.StageName.CHECKOV, required: false },
-    { name: StageName_1.StageName.TRIVY, required: false },
     { name: StageName_1.StageName.PUBLISH, required: false },
+    // Trivy is NOT included here — it runs in PROMOTE_STAGES to scan the
+    // already-built image before promoting to an environment tag.
 ];
 const PROMOTE_STAGES = [
     { name: StageName_1.StageName.TRIVY, required: false },
