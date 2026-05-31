@@ -4370,27 +4370,42 @@ class PlanExtractor {
         return [planCmd, showCmd];
     }
     /**
-     * Command to collect module groups used for multi-module account resolution.
-     * Mirrors line 59 in PreDeployStage.groovy.
+     * Command to discover all modules in DAG order.
+     *
+     * Tries multiple commands in order (all silent on failure):
+     *   1. `terragrunt list --format=json --dag`  — v1.0 primary (array output)
+     *   2. `terragrunt find --dag --json`          — v1.0 alternative (may output grouped object)
+     *   3. `terragrunt output-module-groups`        — legacy v0.x (grouped object)
+     *
+     * The first command that produces valid JSON wins.
+     * Output is parsed by `flattenModuleGroups()` which handles all three formats.
      */
     buildModuleGroupsCommand(cmd) {
         const { workingDir } = PlanExtractor.parseFlags(cmd);
         const wd = workingDir ? ` --working-dir ${workingDir}` : '';
-        return `terragrunt${wd} find --dag --json 2>/dev/null`;
+        // Bash: try each command; output the first that produces non-empty stdout.
+        return (`(terragrunt${wd} list --format=json --dag 2>/dev/null ||` +
+            ` terragrunt${wd} find --dag --json 2>/dev/null ||` +
+            ` terragrunt output-module-groups${wd} 2>/dev/null)`);
     }
     // ── Plan parsing ──────────────────────────────────────────────────────────
     /**
-     * Reads the raw JSONL plan file and writes one per-account JSON for each line.
+     * Reads the raw JSONL plan file and writes one per-module JSON for each line.
      * Returns the list of extracted plans (file paths + optional module paths).
      *
-     * Account name resolution order (mirrors TerragruntUtils.getVarEnvIdFromPlan):
-     *   1. planJson.variables.env_id.value
-     *   2. fallbackAccount
+     * Account / module name resolution (priority order):
+     *   1. `planJson.variables.env_id.value`  — explicit per-module identifier (platform-infra style)
+     *   2. Normalized module path             — dynamic discovery from `buildModuleGroupsCommand`
+     *      e.g. "/abs/path/live/dev/ecs/nursa" → "ecs-nursa"
+     *   3. `fallbackAccount`                  — projectId, used when no path is available
+     *
+     * Deduplication: when multiple modules resolve to the same name (e.g. all fall
+     * back to the same projectId and no module paths were discovered), a `-N` suffix
+     * is appended to prevent file overwrites: "dropstat", "dropstat-2", "dropstat-3".
      *
      * @param modulePaths  Ordered list from `PlanExtractor.flattenModuleGroups()`.
-     *                     When provided, each successfully-parsed module is annotated
-     *                     with its absolute path at the matching index — mirrors
-     *                     TerragruntUtils.getFolderModule (moduleCount ↔ moduleIndex).
+     *                     Must be in the same order as lines in the JSONL file
+     *                     (both reflect the Terragrunt DAG execution order).
      */
     extractPerAccountPlans(cmdIndex, fallbackAccount, modulePaths) {
         const rawFile = this.rawJsonName(cmdIndex);
@@ -4403,7 +4418,10 @@ class PlanExtractor {
             .split('\n')
             .filter(l => l.trim().length > 0);
         const created = [];
-        let moduleIndex = 0; // tracks only successfully-parsed modules (mirrors moduleCount in Groovy)
+        let moduleIndex = 0;
+        // Track how many times each base name has been used — prevents file overwrites
+        // when env_id is absent and module paths are unavailable (all fall back to projectId).
+        const nameCount = new Map();
         for (const line of lines) {
             let planJson;
             try {
@@ -4413,9 +4431,28 @@ class PlanExtractor {
                 core.warning(`PlanExtractor: skipping non-JSON line in ${rawFile}`);
                 continue;
             }
-            const accountName = PlanExtractor.resolveAccountName(planJson, fallbackAccount);
-            const filePath = PlanExtractor.perAccountName(cmdIndex, accountName);
             const modulePath = modulePaths?.[moduleIndex];
+            // ── Name resolution ──────────────────────────────────────────────────
+            const envId = PlanExtractor.resolveAccountName(planJson, '');
+            let baseName;
+            if (envId) {
+                // Priority 1: explicit env_id variable in the plan (platform-infra repos)
+                baseName = envId;
+            }
+            else if (modulePath) {
+                // Priority 2: derive a readable name from the discovered module path
+                baseName = PlanExtractor.normalizeModulePath(modulePath);
+            }
+            else {
+                // Priority 3: project-level fallback
+                baseName = fallbackAccount;
+            }
+            // Deduplicate: append counter starting from 2 for repeated base names
+            const seen = nameCount.get(baseName) ?? 0;
+            nameCount.set(baseName, seen + 1);
+            const accountName = seen === 0 ? baseName : `${baseName}-${seen + 1}`;
+            // ─────────────────────────────────────────────────────────────────────
+            const filePath = PlanExtractor.perAccountName(cmdIndex, accountName);
             fs.writeFileSync(filePath, JSON.stringify(planJson, null, 2), 'utf8');
             core.info(`Extracted plan → ${filePath}  (account: ${accountName}` +
                 `${modulePath ? `  path: ${modulePath}` : ''})`);
@@ -4435,28 +4472,104 @@ class PlanExtractor {
     }
     // ── Module-groups helpers ─────────────────────────────────────────────────
     /**
-     * Parses the JSON output of `terragrunt output-module-groups` and returns
-     * an **ordered flat list** of absolute module paths — one entry per module,
-     * in the same order as the lines in the raw JSONL plan file.
+     * Normalizes an absolute or relative module path to a short, filesystem-safe
+     * identifier suitable for use as an artifact / plan-summary name.
      *
-     * Mirrors TerragruntUtils.getModuleAbsolutePath / getFolderModule:
-     *   - Single group  → all paths in the group, in order.
-     *   - Multiple groups → first path from each group, in group order.
+     * Examples:
+     *   "/abs/path/live/dev/ecs/nursa"       → "ecs-nursa"
+     *   "live/dev/storage/aurora"            → "storage-aurora"
+     *   "storage/aurora"                     → "storage-aurora"
+     *   "management/github-oidc"             → "management-github-oidc"
+     *   "/abs/path/live/dev/only-one"        → "only-one"
      *
-     * Returns [] on empty / invalid input (always safe to call).
+     * Strategy: strip generic lifecycle segments (live/dev/staging/prod/etc.),
+     * take the last 2 meaningful segments, join with "-", lowercase.
+     */
+    static normalizeModulePath(modulePath) {
+        const normalized = modulePath.replace(/\\/g, '/').replace(/\/$/, '');
+        const parts = normalized.split('/').filter(Boolean);
+        // Segments that don't carry module identity — strip them.
+        const skip = new Set([
+            'live', 'environments', 'envs',
+            'dev', 'development',
+            'staging', 'stage',
+            'prod', 'production',
+            'uat', 'qa', 'test',
+        ]);
+        const meaningful = parts.filter(p => !skip.has(p.toLowerCase()));
+        const segments = meaningful.length >= 2
+            ? meaningful.slice(-2)
+            : meaningful.length === 1
+                ? meaningful
+                : parts.slice(-2); // absolute fallback: always produce something
+        return segments
+            .join('-')
+            .replace(/[^a-zA-Z0-9_-]/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '')
+            .toLowerCase();
+    }
+    /**
+     * Parses the JSON output of any Terragrunt module-discovery command and returns
+     * an **ordered flat list** of module paths — one entry per module.
+     *
+     * Handles three output formats automatically:
+     *
+     *   Array (v1.0 `list --format=json --dag`):
+     *     ["path/to/module1", "path/to/module2"]
+     *
+     *   Grouped object (legacy `output-module-groups` / `find --dag --json`):
+     *     {"Group 1": ["path1", "path2"], "Group 2": ["path3"]}
+     *     → Single group:   all paths in order.
+     *     → Multiple groups: first path from each group in group order.
+     *       (mirrors TerragruntUtils getFolderModule / mgArray[moduleCount][0])
+     *
+     *   Object with path keys (some `find` variants):
+     *     {"path/module1": {...}, "path/module2": {...}}
+     *     → keys are treated as paths.
+     *
+     * Always returns [] on empty / unparseable input — safe to call in all cases.
      */
     static flattenModuleGroups(json) {
         if (!json || !json.trim())
             return [];
         try {
-            const groups = JSON.parse(json.trim());
-            const values = Object.values(groups);
-            if (values.length === 0)
-                return [];
-            if (values.length === 1)
-                return values[0];
-            // Multiple groups: take the first path from each group (mirrors mgArray[moduleCount][0])
-            return values.map(g => g[0] ?? '');
+            const parsed = JSON.parse(json.trim());
+            // ── Array format ─────────────────────────────────────────────────────
+            // `terragrunt list --format=json [--dag]` → ["path1", "path2", ...]
+            if (Array.isArray(parsed)) {
+                return parsed
+                    .map(entry => {
+                    if (typeof entry === 'string')
+                        return entry;
+                    // Some versions emit [{"path": "..."}, ...] objects
+                    if (typeof entry === 'object' && entry !== null && 'path' in entry) {
+                        return String(entry.path);
+                    }
+                    return null;
+                })
+                    .filter((p) => typeof p === 'string' && p.length > 0);
+            }
+            // ── Object format ────────────────────────────────────────────────────
+            if (typeof parsed === 'object' && parsed !== null) {
+                const obj = parsed;
+                const values = Object.values(obj);
+                // Grouped format: values are arrays of strings → {"Group N": ["path", ...]}
+                if (values.length > 0 && Array.isArray(values[0])) {
+                    const groups = obj;
+                    const groupValues = Object.values(groups);
+                    if (groupValues.length === 0)
+                        return [];
+                    if (groupValues.length === 1)
+                        return groupValues[0];
+                    // Multiple parallel groups: one path per group (DAG execution order).
+                    // Preserve empty strings for empty groups (mirrors legacy behavior).
+                    return groupValues.map(g => g[0] ?? '');
+                }
+                // Keyed format: keys are module paths → {"path/module": {...}}
+                return Object.keys(obj).filter(k => k.length > 0);
+            }
+            return [];
         }
         catch {
             return [];
@@ -140197,24 +140310,6 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
-
-/***/ }),
-
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -150541,132 +150636,6 @@ exports.listType = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -153882,6 +153851,132 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -153952,6 +154047,24 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
+
+/***/ }),
+
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
