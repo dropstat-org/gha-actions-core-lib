@@ -2171,7 +2171,10 @@ class DeployStage extends AbstractDeployStage_1.AbstractDeployStage {
         // reference the plan file to prevent an unreviewed re-plan.
         // destroy commands do not require a plan file reference.
         for (const applyCmd of applyCmds) {
-            if (!containsSubcommand(applyCmd, 'run-all') && !applyHasPlanFileArg(applyCmd)) {
+            // v1.0: 'run --all apply' is equivalent to 'run-all apply' — both are exempt.
+            const isRunAll = containsSubcommand(applyCmd, 'run-all') ||
+                (containsSubcommand(applyCmd, 'run') && containsSubcommand(applyCmd, '--all'));
+            if (!isRunAll && !applyHasPlanFileArg(applyCmd)) {
                 throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_MISSING_PLAN_REF, `Terraform 'apply' must reference the plan file produced by the plan stage ` +
                     `(e.g., 'terragrunt apply tfplan.binary'). Bare apply re-plans and bypasses the reviewed plan.`);
             }
