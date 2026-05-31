@@ -4278,11 +4278,14 @@ class PlanExtractor {
         // Strip any user-supplied -out / --out so we control the output filename.
         // Handles both forms: --out=file  and  --out file
         const cleanCmd = cmd.replace(/\s+-{1,2}out(?:=\S+|\s+\S+)/g, '').trimEnd();
-        const ni = runAll ? ' --non-interactive' : '';
-        // v1.0: Terraform flags (--out) must be separated from Terragrunt flags with --
-        // This is backwards-compatible: older Terragrunt also accepts -- as separator.
+        const globalFlags = `${runAll ? '--non-interactive' : ''}${wd}`.trim();
+        const globalPrefix = globalFlags ? ` ${globalFlags}` : '';
+        // v1.0: Terraform flags separated from Terragrunt flags with --
         const planCmd = `${cleanCmd} -- --out ${binary}`;
-        const showCmd = `terragrunt ${ra}show -json ${binary}${ni}${wd} > ${json}`;
+        // v1.0: show command — Terragrunt global flags before run-all, terraform flags after --
+        const showCmd = runAll
+            ? `terragrunt${globalPrefix} run --all show -- -json ${binary} > ${json}`
+            : `terragrunt show -- -json ${binary} > ${json}`;
         return [planCmd, showCmd];
     }
     /**
