@@ -312,15 +312,27 @@ jobs:
       needs.deploy.result != 'failure'
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: write
     steps:
       - uses: actions/checkout@v4.2.2
+      - name: Setup AWS credentials
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-release
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA_TAG: ${{ inputs.sha_tag }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
 
   ecs_deploy:
     name: ECS Deploy
