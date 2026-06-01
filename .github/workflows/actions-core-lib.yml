@@ -185,6 +185,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
 
   pre_deploy:
@@ -285,6 +286,7 @@ jobs:
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
 
   post_deploy:
@@ -349,4 +351,5 @@ jobs:
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
           ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
