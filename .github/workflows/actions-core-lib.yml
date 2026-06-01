@@ -160,15 +160,24 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4.2.2
+      - name: Setup AWS credentials (ECR push)
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-publish
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
 
   pre_deploy:
     name: Pre Deploy
