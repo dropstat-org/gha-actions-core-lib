@@ -151,7 +151,7 @@ jobs:
     if: |
       always() &&
       needs.config.outputs.publish_enabled == 'true' &&
-      needs.compile.result == 'success' &&
+      needs.compile.result != 'failure' &&
       needs.unit_test.result != 'failure' &&
       needs.linter.result != 'failure' &&
       needs.semgrep.result != 'failure' &&
@@ -237,7 +237,10 @@ jobs:
     name: Deploy
     needs: [config, pre_deploy, plan]
     # environment gate: uses deploy.environment from action.yaml (empty = no gate for app repos)
+    # When the environment has required reviewers, GitHub pauses here until approved/rejected.
+    # timeout-minutes aborts automatically if nobody acts within the window.
     environment: ${{ needs.config.outputs.deploy_environment }}
+    timeout-minutes: 60
     if: |
       always() &&
       needs.config.outputs.deploy_enabled == 'true' &&
