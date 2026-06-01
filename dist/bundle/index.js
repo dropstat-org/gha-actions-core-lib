@@ -49,9 +49,11 @@ class ArchiveManager {
         return config.registry === 'ecr' ? new DockerECR_1.DockerECR() : new DockerGHCR_1.DockerGHCR();
     }
     async packageAndUpload(localImage, config) {
+        const artifact = this.artifact(config);
         const dest = config.tag ? `${config.image}:${config.tag}` : config.image;
         core.info(`packageAndUpload: ${localImage} → ${dest}`);
-        await this.artifact(config).upload(localImage, dest);
+        await artifact.login(); // ECR: get-login-password | docker login; GHCR: docker login ghcr.io
+        await artifact.upload(localImage, dest);
     }
     async moveAndPublish(source, destination) {
         const src = source.tag ? `${source.image}:${source.tag}` : source.image;
