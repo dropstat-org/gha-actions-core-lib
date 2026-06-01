@@ -31,6 +31,7 @@ jobs:
       plan_enabled:        ${{ steps.ActionsCoreLib.outputs.plan_enabled }}
       publish_enabled:     ${{ steps.ActionsCoreLib.outputs.publish_enabled }}
       release_enabled:     ${{ steps.ActionsCoreLib.outputs.release_enabled }}
+      ecs_deploy_enabled:  ${{ steps.ActionsCoreLib.outputs.ecs_deploy_enabled }}
       deploy_enabled:      ${{ steps.ActionsCoreLib.outputs.deploy_enabled }}
       pre_deploy_enabled:  ${{ steps.ActionsCoreLib.outputs.pre_deploy_enabled }}
       post_deploy_enabled: ${{ steps.ActionsCoreLib.outputs.post_deploy_enabled }}
@@ -316,3 +317,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA_TAG: ${{ inputs.sha_tag }}
+
+  ecs_deploy:
+    name: ECS Deploy
+    needs: [config, release]
+    if: |
+      always() &&
+      needs.config.outputs.ecs_deploy_enabled == 'true' &&
+      needs.release.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Setup AWS credentials
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-ecs-deploy
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: ecs_deploy
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
