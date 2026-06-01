@@ -183,7 +183,8 @@ jobs:
           stage: publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
 
   pre_deploy:
@@ -282,7 +283,8 @@ jobs:
         with:
           stage: deploy
         env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
 
   post_deploy:
@@ -345,5 +347,6 @@ jobs:
         with:
           stage: ecs_deploy
         env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
