@@ -346,3 +346,4 @@ jobs:
           stage: ecs_deploy
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
