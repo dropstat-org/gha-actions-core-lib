@@ -326,6 +326,8 @@ jobs:
       needs.config.outputs.ecs_deploy_enabled == 'true' &&
       needs.release.result != 'failure'
     runs-on: ubuntu-latest
+    # Environment gate — injects ECS_DEPLOY_ROLE secret for the target env (dev/qa/prod)
+    environment: ${{ needs.config.outputs.deploy_environment }}
     permissions:
       id-token: write
       contents: read
