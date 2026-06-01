@@ -5955,6 +5955,47 @@ class MetadataValidator {
         if (!VERSION_PATTERN.test(metadata.version)) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.INVALID_VERSION, `metadata.version '${metadata.version}' must follow semver format X.X.X`);
         }
+        // ── Naming convention validation ─────────────────────────────────────────
+        // projectId  → GitHub team / folder prefix (e.g. "gha", "dropstat", "nursa")
+        //              Represents WHO owns the service, maps to a GitHub team.
+        // serviceId  → Repository name without the projectId prefix
+        //              (e.g. repo "gha-demo-api-ecs" → serviceId = "demo-api-ecs")
+        //
+        // Common mistake: copy-pasting both as the same value.
+        // Example of WRONG config:
+        //   projectId: demo-api    ← should be the team prefix, e.g. "gha"
+        //   serviceId: demo-api    ← should be the repo suffix, e.g. "demo-api-ecs"
+        //
+        // Example of CORRECT config for repo "gha-demo-api-ecs" owned by team "gha":
+        //   projectId: gha
+        //   serviceId: demo-api-ecs
+        if (metadata.projectId === metadata.serviceId) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.INVALID_PROJECT_ID, `metadata.projectId and metadata.serviceId must be different.\n\n` +
+                `  projectId = "${metadata.projectId}" (same as serviceId — likely a copy-paste error)\n\n` +
+                `  Convention:\n` +
+                `    projectId → GitHub team/folder prefix that owns this service\n` +
+                `                Examples: "gha", "dropstat", "nursa", "backend"\n` +
+                `    serviceId → Repository name without the team prefix\n` +
+                `                Examples: for repo "gha-demo-api-ecs" → serviceId = "demo-api-ecs"\n\n` +
+                `  Fix your action.yaml:\n` +
+                `    metadata:\n` +
+                `      projectId: <team-prefix>    # e.g. "gha"\n` +
+                `      serviceId: <repo-suffix>    # e.g. "demo-api-ecs"`);
+        }
+        // Warn if serviceId looks like a full repo name with projectId prefix
+        // (e.g. projectId=gha, serviceId=gha-demo-api → serviceId should be "demo-api")
+        const repoStyleServiceId = `${metadata.projectId}-`;
+        if (metadata.serviceId.startsWith(repoStyleServiceId)) {
+            // Warning only — some teams may intentionally use this format
+            const suggestion = metadata.serviceId.slice(repoStyleServiceId.length);
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.INVALID_SERVICE_ID, `metadata.serviceId '${metadata.serviceId}' starts with the projectId prefix '${metadata.projectId}-'.\n\n` +
+                `  serviceId should be the repo name WITHOUT the team prefix.\n` +
+                `  Did you mean: serviceId: "${suggestion}" ?\n\n` +
+                `  Convention:\n` +
+                `    Repo name:  ${metadata.projectId}-${suggestion}\n` +
+                `    projectId:  ${metadata.projectId}   (team prefix)\n` +
+                `    serviceId:  ${suggestion}            (suffix only)`);
+        }
     }
 }
 exports.MetadataValidator = MetadataValidator;
