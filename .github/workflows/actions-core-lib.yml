@@ -353,3 +353,4 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
           ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
+          SHA_TAG: ${{ inputs.sha_tag }}
