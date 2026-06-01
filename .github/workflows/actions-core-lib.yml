@@ -7,7 +7,13 @@ on:
       - 'dist/**'
   pull_request:
   workflow_dispatch:
-  workflow_call: # secrets are inherited automatically when caller uses `secrets: inherit`
+  workflow_call:
+    inputs:
+      sha_tag:
+        description: "Override image SHA tag for CD repos (e.g. sha-abc1234). If not set, uses the commit SHA."
+        type: string
+        required: false
+        default: ""
 
 jobs:
   config:
@@ -309,3 +315,4 @@ jobs:
           stage: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA_TAG: ${{ inputs.sha_tag }}

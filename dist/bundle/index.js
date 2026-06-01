@@ -3024,7 +3024,9 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
             return;
         }
         const docker = stage.publish.docker;
-        const shaTag = `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`;
+        // SHA_TAG env var allows CD repos to override the commitHash-based sha tag.
+        // Set via workflow_call input sha_tag → the lib passes it as SHA_TAG env var.
+        const shaTag = process.env.SHA_TAG ?? `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`;
         await this.archive.moveAndPublish({ ...docker, tag: shaTag }, { ...docker, tag: env });
         core.info(`Promoted ${docker.image}:${shaTag} → ${docker.image}:${env}`);
     }
