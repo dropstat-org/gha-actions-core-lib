@@ -1305,6 +1305,7 @@ const AbstractAnalyzerStage_1 = __nccwpck_require__(69751);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const StageTransfer_1 = __nccwpck_require__(24734);
 const Logger_1 = __nccwpck_require__(26747);
+const SecurityConfigLoader_1 = __nccwpck_require__(76560);
 /**
  * Full port of CheckovTfStage.groovy — runs checkov against every per-account
  * terraform plan file produced by PlanStage.
@@ -1349,8 +1350,9 @@ class CheckovTfStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
         }
         return platformSoftFail;
     }
-    buildArgs(stage, planFile) {
-        const skipChecks = stage.checkov?.skipChecks ?? [];
+    buildArgs(stage, planFile, dsoSkipChecks = []) {
+        // Merge action.yaml skipChecks + dso-checkov repo exceptions
+        const skipChecks = [...(stage.checkov?.skipChecks ?? []), ...dsoSkipChecks];
         const externalDir = stage.checkov?.externalChecksDir;
         const { projectId, serviceId } = this.config.metadata;
         const args = [
@@ -1400,6 +1402,10 @@ class CheckovTfStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             const { checkov: checkovVersion } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
             const softFail = this.resolveSoftFail(stage, platformSoftFail);
             await this.install(checkovVersion);
+            // ── Load per-project exceptions from dso-checkov repo ─────────────────────
+            // Branch: release/{projectId}  File: checkov.yaml
+            // Parses the skip-check list from YAML and merges with action.yaml skipChecks.
+            const dsoSkipChecks = await this.loadCheckovExceptions();
             // Restore plan files produced by PlanStage.
             // Wrapped in try so the stage works even when files are already in the workspace.
             try {
@@ -1419,7 +1425,7 @@ class CheckovTfStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             for (const planFile of planFiles) {
                 const account = this.resolveAccountName(planFile);
                 Logger_1.Logger.info(`Security scan → ${planFile}  (account: ${account})`);
-                const args = this.buildArgs(stage, planFile);
+                const args = this.buildArgs(stage, planFile, dsoSkipChecks);
                 const exitCode = await exec.exec('checkov', args, { ignoreReturnCode: true });
                 accountResults.set(account, this.mapResult(exitCode));
             }
@@ -1431,6 +1437,39 @@ class CheckovTfStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
         }
         finally {
             end();
+        }
+    }
+    /** Parses skip-check list from dso-checkov/release/{projectId}/checkov.yaml */
+    async loadCheckovExceptions() {
+        const raw = await SecurityConfigLoader_1.SecurityConfigLoader.fetchCheckovConfig(this.config.metadata.projectId);
+        if (!raw)
+            return [];
+        try {
+            const lines = raw.split('\n');
+            const result = [];
+            let inSkip = false;
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith('skip-check:')) {
+                    inSkip = true;
+                    continue;
+                }
+                if (inSkip && trimmed.startsWith('-')) {
+                    const id = trimmed.replace(/^-\s*/, '').replace(/#.*/, '').trim();
+                    if (id)
+                        result.push(id);
+                }
+                else if (inSkip && trimmed && !trimmed.startsWith('#')) {
+                    inSkip = false;
+                }
+            }
+            if (result.length) {
+                core.info('[SecurityConfigLoader] Checkov skip-check from dso-checkov: ' + result.join(', '));
+            }
+            return result;
+        }
+        catch {
+            return [];
         }
     }
 }
@@ -1484,6 +1523,7 @@ const exec = __importStar(__nccwpck_require__(95236));
 const AbstractAnalyzerStage_1 = __nccwpck_require__(69751);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const SarifUploader_1 = __nccwpck_require__(28020);
+const SecurityConfigLoader_1 = __nccwpck_require__(76560);
 class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     resultMap() {
         return { 0: 'success', 1: 'failure' };
@@ -1501,20 +1541,30 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             const { default_config: DEFAULT_CONFIG, soft_fail: SOFT_FAIL, upload_sarif: UPLOAD_SARIF } = (await PlatformConfigLoader_1.PlatformConfigLoader.securityPolicy()).semgrep;
             const { semgrep: semgrepVersion } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
             await this.install(semgrepVersion);
+            // ── Load per-project exceptions from dso-semgrep repo ───────────────────
+            // Branch: release/{projectId}  File: .semgrepignore
+            // Semgrep reads .semgrepignore automatically from the working directory.
+            const semgrepIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchSemgrepIgnore(this.config.metadata.projectId);
+            if (semgrepIgnore) {
+                (__nccwpck_require__(79896).writeFileSync)('.semgrepignore', semgrepIgnore, 'utf8');
+                core.info('[SecurityConfigLoader] .semgrepignore applied from dso-semgrep');
+            }
             const semgrepConfig = stage.semgrep?.config ?? DEFAULT_CONFIG;
             const extraArgs = stage.semgrep?.args ?? [];
+            // action.yaml softFail overrides platform config when explicitly set
+            const softFail = stage.semgrep?.softFail !== undefined ? stage.semgrep.softFail : SOFT_FAIL;
             // Scan 1: text output for log (determines pass/fail)
             // --error exits with code 1 when findings exist; omitting it exits 0 (soft-fail behaviour)
             const tableArgs = [
                 'scan',
                 '--config', semgrepConfig,
                 '--text',
-                ...(!SOFT_FAIL ? ['--error'] : []),
+                ...(!softFail ? ['--error'] : []),
                 '.',
                 ...extraArgs,
             ];
             const code = await exec.exec('semgrep', tableArgs, { ignoreReturnCode: true });
-            this.handleResult(this.mapResult(code), stage.name, SOFT_FAIL);
+            this.handleResult(this.mapResult(code), stage.name, softFail);
             if (UPLOAD_SARIF) {
                 // Scan 2: SARIF output for GitHub Security tab (requires GitHub Advanced Security)
                 const sarifArgs = [
@@ -1690,6 +1740,7 @@ const ImageSHA_1 = __nccwpck_require__(2870);
 const DockerECR_1 = __nccwpck_require__(91699);
 const StageMessage_1 = __nccwpck_require__(22238);
 const DockerArtifactManager_1 = __nccwpck_require__(68942);
+const SecurityConfigLoader_1 = __nccwpck_require__(76560);
 class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     resultMap() {
         return { 0: 'success', 1: 'failure' };
@@ -1730,6 +1781,14 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             const { severity: SEVERITY, soft_fail: SOFT_FAIL, upload_sarif: UPLOAD_SARIF } = (await PlatformConfigLoader_1.PlatformConfigLoader.securityPolicy()).trivy;
             const { trivy: trivyVersion } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
             await this.install(trivyVersion);
+            // ── Load per-project exceptions from dso-trivy repo ──────────────────────
+            // Branch: release/{projectId}  File: .trivyignore
+            // Trivy reads .trivyignore automatically from the working directory.
+            const trivyIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchTrivyIgnore(this.config.metadata.projectId);
+            if (trivyIgnore) {
+                (__nccwpck_require__(79896).writeFileSync)('.trivyignore', trivyIgnore, 'utf8');
+                core.info('[SecurityConfigLoader] .trivyignore applied from dso-trivy');
+            }
             let scanType = stage.trivy?.scanType ?? 'fs';
             let imageRef = stage.trivy?.imageRef;
             let localShaTag;
@@ -2342,8 +2401,15 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: 'environment: prod' is only allowed on the main branch. ` +
                 `Current branch type: '${this.branchType}'. Merge to main first.`);
         }
-        const { cluster, service, container } = cfg;
-        const imageTag = cfg.image_tag ?? env;
+        // ── Resolve env var references ($VAR) in config values ───────────────────
+        // Allows action.yaml to use GitHub environment variables:
+        //   cluster: $ECS_CLUSTER  →  process.env.ECS_CLUSTER
+        // Set per GitHub environment (dev/qa/prod) so same action.yaml works for all.
+        const resolve = (val) => val.startsWith('$') ? (process.env[val.slice(1)] ?? val) : val;
+        const cluster = resolve(cfg.cluster);
+        const service = resolve(cfg.service);
+        const container = resolve(cfg.container);
+        const imageTag = cfg.image_tag ? resolve(cfg.image_tag) : env;
         const waitStable = cfg.wait_for_stability !== false;
         const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
         // ── Assume ECS deploy role from GitHub environment secret ─────────────────
@@ -5194,6 +5260,148 @@ async function uploadSarif(sarifFile) {
     }
 }
 //# sourceMappingURL=SarifUploader.js.map
+
+/***/ }),
+
+/***/ 76560:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SecurityConfigLoader = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const fs = __importStar(__nccwpck_require__(79896));
+/**
+ * Loads per-project security exception configs from dedicated dso-* repos.
+ *
+ * Convention:
+ *   Repo:   dso-{tool}          (dso-trivy / dso-checkov / dso-semgrep)
+ *   Branch: release/{projectId} (e.g. release/demo-api)
+ *   File:   tool-specific       (.trivyignore / checkov.yaml / .semgrepignore)
+ *
+ * The lib fetches the file via GitHub API using GITHUB_TOKEN.
+ * If the repo, branch, or file does not exist the tool runs with no exceptions
+ * — missing config is never an error.
+ *
+ * Usage (applied automatically by TrivyStage, CheckovStage, SemgrepStage):
+ *   const ignore = await SecurityConfigLoader.fetchTrivyIgnore(projectId);
+ *   if (ignore) fs.writeFileSync('.trivyignore', ignore);
+ */
+class SecurityConfigLoader {
+    // ── Public helpers ──────────────────────────────────────────────────────────
+    /**
+     * Fetches the .trivyignore file for the given project.
+     * Returns the file content or null if not found.
+     */
+    static async fetchTrivyIgnore(projectId) {
+        return this.fetch('dso-trivy', projectId, '.trivyignore');
+    }
+    /**
+     * Fetches checkov.yaml for the given project.
+     * Returns the file content or null if not found.
+     */
+    static async fetchCheckovConfig(projectId) {
+        return this.fetch('dso-checkov', projectId, 'checkov.yaml');
+    }
+    /**
+     * Fetches .semgrepignore for the given project.
+     * Returns the file content or null if not found.
+     */
+    static async fetchSemgrepIgnore(projectId) {
+        return this.fetch('dso-semgrep', projectId, '.semgrepignore');
+    }
+    /**
+     * Writes a fetched config to a temp file and returns the path.
+     * Returns null if content is null (no config found).
+     */
+    static writeTempConfig(content, filename) {
+        const path = `/tmp/${filename}`;
+        fs.writeFileSync(path, content, 'utf8');
+        return path;
+    }
+    // ── Core fetch ──────────────────────────────────────────────────────────────
+    /**
+     * Fetches raw file content from a dso-* repo on the release/{projectId} branch.
+     * Uses GITHUB_TOKEN for auth — works for repos within the same org that the
+     * token can read (internal / public repos, or private with org-level secret).
+     *
+     * Returns null on any error (404, auth failure, network) — always safe to call.
+     */
+    static async fetch(dsoRepo, projectId, filename) {
+        const org = process.env.GITHUB_REPOSITORY_OWNER ?? this.orgFromRepo();
+        const branch = `release/${projectId}`;
+        const url = `https://api.github.com/repos/${org}/${dsoRepo}/contents/${filename}?ref=${branch}`;
+        const token = process.env.GITHUB_TOKEN ?? '';
+        const headers = {
+            'Accept': 'application/vnd.github.v3.raw',
+            'User-Agent': 'gha-actions-core-lib/security-config-loader',
+        };
+        if (token)
+            headers['Authorization'] = `Bearer ${token}`;
+        try {
+            const res = await fetch(url, { headers });
+            if (res.status === 404) {
+                core.info(`[SecurityConfigLoader] No exceptions found for ${projectId} in ${dsoRepo} ` +
+                    `(branch: ${branch}, file: ${filename}) — running with defaults`);
+                return null;
+            }
+            if (!res.ok) {
+                core.warning(`[SecurityConfigLoader] Could not fetch ${dsoRepo}/${branch}/${filename}: ` +
+                    `HTTP ${res.status} — running with defaults`);
+                return null;
+            }
+            const content = await res.text();
+            core.info(`[SecurityConfigLoader] Loaded exceptions for ${projectId} from ` +
+                `${dsoRepo} (branch: ${branch}, file: ${filename})`);
+            return content;
+        }
+        catch (err) {
+            core.warning(`[SecurityConfigLoader] Failed to fetch from ${dsoRepo}: ${err.message} — running with defaults`);
+            return null;
+        }
+    }
+    // ── Helpers ─────────────────────────────────────────────────────────────────
+    static orgFromRepo() {
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        return repo.split('/')[0] ?? 'dropstat-org';
+    }
+}
+exports.SecurityConfigLoader = SecurityConfigLoader;
+//# sourceMappingURL=SecurityConfigLoader.js.map
 
 /***/ }),
 
