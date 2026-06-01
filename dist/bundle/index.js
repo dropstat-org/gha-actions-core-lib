@@ -236,13 +236,25 @@ class DockerECR {
         if (!manifest || manifest === 'None') {
             throw new Error(`ECR image not found: ${repo}:${srcTag}`);
         }
-        await exec.exec('aws', [
+        let putOutput = '';
+        const putCode = await exec.exec('aws', [
             'ecr', 'put-image',
             '--region', this.region,
             '--repository-name', repo,
             '--image-tag', destTag,
             '--image-manifest', manifest,
-        ]);
+        ], {
+            ignoreReturnCode: true,
+            listeners: { stderr: (d) => { putOutput += d.toString(); } },
+        });
+        // ImageAlreadyExistsException: tag already points to the same digest — idempotent, treat as success.
+        if (putCode !== 0 && putOutput.includes('ImageAlreadyExistsException')) {
+            core.info(`ECR tag '${destTag}' already points to the same digest — promotion is a no-op ✅`);
+            return;
+        }
+        if (putCode !== 0) {
+            throw new Error(`ECR put-image failed (exit ${putCode}): ${putOutput}`);
+        }
     }
     /** Checks existence via ECR API — no docker daemon required. */
     async checkFile(imageRef) {
