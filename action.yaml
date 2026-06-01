@@ -1,0 +1,15 @@
+version: "1.0"
+type: library
+
+metadata:
+  projectId: gha
+  serviceId: actions-core-lib
+  version: "1.0.0"
+
+tools:
+  node: "24"
+
+stages:
+  - name: compile
+  - name: unit_test
+  - name: linter
