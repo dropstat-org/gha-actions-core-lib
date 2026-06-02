@@ -236,13 +236,25 @@ class DockerECR {
         if (!manifest || manifest === 'None') {
             throw new Error(`ECR image not found: ${repo}:${srcTag}`);
         }
-        await exec.exec('aws', [
+        let putOutput = '';
+        const putCode = await exec.exec('aws', [
             'ecr', 'put-image',
             '--region', this.region,
             '--repository-name', repo,
             '--image-tag', destTag,
             '--image-manifest', manifest,
-        ]);
+        ], {
+            ignoreReturnCode: true,
+            listeners: { stderr: (d) => { putOutput += d.toString(); } },
+        });
+        // ImageAlreadyExistsException: tag already points to the same digest — idempotent, treat as success.
+        if (putCode !== 0 && putOutput.includes('ImageAlreadyExistsException')) {
+            core.info(`ECR tag '${destTag}' already points to the same digest — promotion is a no-op ✅`);
+            return;
+        }
+        if (putCode !== 0) {
+            throw new Error(`ECR put-image failed (exit ${putCode}): ${putOutput}`);
+        }
     }
     /** Checks existence via ECR API — no docker daemon required. */
     async checkFile(imageRef) {
@@ -1471,7 +1483,7 @@ class CheckovTfStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     }
     /** Parses skip-check list from dso-checkov/release/{projectId}/checkov.yaml */
     async loadCheckovExceptions() {
-        const raw = await SecurityConfigLoader_1.SecurityConfigLoader.fetchCheckovConfig(this.config.metadata.projectId);
+        const raw = await SecurityConfigLoader_1.SecurityConfigLoader.fetchCheckovConfig(this.config.metadata.projectId, this.config.metadata.serviceId);
         if (!raw)
             return [];
         try {
@@ -1574,7 +1586,7 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             // ── Load per-project exceptions from dso-semgrep repo ───────────────────
             // Branch: release/{projectId}  File: .semgrepignore
             // Semgrep reads .semgrepignore automatically from the working directory.
-            const semgrepIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchSemgrepIgnore(this.config.metadata.projectId);
+            const semgrepIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchSemgrepIgnore(this.config.metadata.projectId, this.config.metadata.serviceId);
             if (semgrepIgnore) {
                 (__nccwpck_require__(79896).writeFileSync)('.semgrepignore', semgrepIgnore, 'utf8');
                 core.info('[SecurityConfigLoader] .semgrepignore applied from dso-semgrep');
@@ -1814,7 +1826,7 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             // ── Load per-project exceptions from dso-trivy repo ──────────────────────
             // Branch: release/{projectId}  File: .trivyignore
             // Trivy reads .trivyignore automatically from the working directory.
-            const trivyIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchTrivyIgnore(this.config.metadata.projectId);
+            const trivyIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchTrivyIgnore(this.config.metadata.projectId, this.config.metadata.serviceId);
             if (trivyIgnore) {
                 (__nccwpck_require__(79896).writeFileSync)('.trivyignore', trivyIgnore, 'utf8');
                 core.info('[SecurityConfigLoader] .trivyignore applied from dso-trivy');
@@ -2233,6 +2245,7 @@ const ActionsType_1 = __nccwpck_require__(15515);
 const StageTransfer_1 = __nccwpck_require__(24734);
 const PlanSummary_1 = __nccwpck_require__(60566);
 const ApplySummary_1 = __nccwpck_require__(48763);
+const TerragruntStateSummary_1 = __nccwpck_require__(40792);
 function containsSubcommand(cmd, sub) {
     return cmd.trim().split(/\s+/).includes(sub);
 }
@@ -2292,6 +2305,18 @@ class DeployStage extends AbstractDeployStage_1.AbstractDeployStage {
             core.info('DeployStage: no plan summary files found — skipping summary display');
         }
     }
+    /**
+     * Extracts --working-dir value from terragrunt commands.
+     * e.g. "terragrunt --working-dir live/dev run --all apply" → "live/dev"
+     */
+    extractWorkingDir(commands) {
+        for (const cmd of commands) {
+            const match = cmd.match(/--working-dir\s+(\S+)/);
+            if (match)
+                return match[1];
+        }
+        return null;
+    }
     async run(stage) {
         // Same env vars as PlanStage — deploy runner may be a different job/runner.
         if (this.config.type === ActionsType_1.ActionsType.TERRAFORM) {
@@ -2334,9 +2359,16 @@ class DeployStage extends AbstractDeployStage_1.AbstractDeployStage {
         }
         finally {
             end();
-            // Write apply summary after commands complete
-            if (this.config.type === ActionsType_1.ActionsType.TERRAFORM && applyOutput) {
-                await ApplySummary_1.ApplySummary.writeSummary(applyOutput);
+            if (this.config.type === ActionsType_1.ActionsType.TERRAFORM) {
+                // 1. Apply diff summary — what changed in this run (from stdout)
+                if (applyOutput) {
+                    await ApplySummary_1.ApplySummary.writeSummary(applyOutput);
+                }
+                // 2. Full state summary — all managed resources (from terragrunt show -json)
+                const workingDir = this.extractWorkingDir(stage.commands ?? []);
+                if (workingDir) {
+                    await TerragruntStateSummary_1.TerragruntStateSummary.writeSummary(workingDir);
+                }
             }
         }
     }
@@ -2463,7 +2495,12 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const cluster = resolve(cfg.cluster);
         const service = resolve(cfg.service);
         const container = resolve(cfg.container);
-        const imageTag = cfg.image_tag ? resolve(cfg.image_tag) : env;
+        // image_tag resolution:
+        //   1. cfg.image_tag set and resolves to non-empty → use it (e.g. $SHA_TAG = sha-052c920)
+        //   2. cfg.image_tag resolves to empty (env var not set) → fall back to env name (dev/qa/prod)
+        //   3. cfg.image_tag not set → env name
+        const resolvedTag = cfg.image_tag ? resolve(cfg.image_tag) : '';
+        const imageTag = resolvedTag || env;
         const waitStable = cfg.wait_for_stability !== false;
         const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
         // ── Assume ECS deploy role from GitHub environment secret ─────────────────
@@ -2540,11 +2577,14 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         newArn = newArn.trim();
         core.info(`   new revision: ${newArn}`);
         // ── 4. Update ECS service ─────────────────────────────────────────────────
+        // --force-new-deployment cancels any previous rolling deployment and starts
+        // a fresh one, preventing the service from cycling old failing task defs.
         await exec.exec('aws', [
             'ecs', 'update-service',
             '--cluster', cluster,
             '--service', service,
             '--task-definition', newArn,
+            '--force-new-deployment',
             '--region', region,
         ]);
         // ── 5. Wait for service stability ─────────────────────────────────────────
@@ -5588,64 +5628,47 @@ exports.SecurityConfigLoader = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const fs = __importStar(__nccwpck_require__(79896));
 /**
- * Loads per-project security exception configs from dedicated dso-* repos.
+ * Loads per-repo security exception configs from dedicated dso-* repos.
  *
  * Convention:
- *   Repo:   dso-{tool}          (dso-trivy / dso-checkov / dso-semgrep)
- *   Branch: release/{projectId} (e.g. release/demo-api)
- *   File:   tool-specific       (.trivyignore / checkov.yaml / .semgrepignore)
+ *   Repo:   dso-{tool}                       (dso-trivy / dso-checkov / dso-semgrep)
+ *   Branch: release/{projectId}-{serviceId}  (e.g. release/gha-demo-api-ecs)
+ *   File:   tool-specific                    (.trivyignore / checkov.yaml / .semgrepignore)
+ *
+ * Branch is per-repo (projectId + serviceId) not per-team (projectId only).
+ * This ensures exceptions are isolated — a CVE suppressed in one service
+ * does not silently suppress it in all other services of the same team.
  *
  * The lib fetches the file via GitHub API using GITHUB_TOKEN.
  * If the repo, branch, or file does not exist the tool runs with no exceptions
  * — missing config is never an error.
  *
  * Usage (applied automatically by TrivyStage, CheckovStage, SemgrepStage):
- *   const ignore = await SecurityConfigLoader.fetchTrivyIgnore(projectId);
+ *   const ignore = await SecurityConfigLoader.fetchTrivyIgnore(projectId, serviceId);
  *   if (ignore) fs.writeFileSync('.trivyignore', ignore);
  */
 class SecurityConfigLoader {
     // ── Public helpers ──────────────────────────────────────────────────────────
-    /**
-     * Fetches the .trivyignore file for the given project.
-     * Returns the file content or null if not found.
-     */
-    static async fetchTrivyIgnore(projectId) {
-        return this.fetch('dso-trivy', projectId, '.trivyignore');
+    static async fetchTrivyIgnore(projectId, serviceId) {
+        return this.fetch('dso-trivy', projectId, serviceId, '.trivyignore');
     }
-    /**
-     * Fetches checkov.yaml for the given project.
-     * Returns the file content or null if not found.
-     */
-    static async fetchCheckovConfig(projectId) {
-        return this.fetch('dso-checkov', projectId, 'checkov.yaml');
+    static async fetchCheckovConfig(projectId, serviceId) {
+        return this.fetch('dso-checkov', projectId, serviceId, 'checkov.yaml');
     }
-    /**
-     * Fetches .semgrepignore for the given project.
-     * Returns the file content or null if not found.
-     */
-    static async fetchSemgrepIgnore(projectId) {
-        return this.fetch('dso-semgrep', projectId, '.semgrepignore');
+    static async fetchSemgrepIgnore(projectId, serviceId) {
+        return this.fetch('dso-semgrep', projectId, serviceId, '.semgrepignore');
     }
-    /**
-     * Writes a fetched config to a temp file and returns the path.
-     * Returns null if content is null (no config found).
-     */
     static writeTempConfig(content, filename) {
         const path = `/tmp/${filename}`;
         fs.writeFileSync(path, content, 'utf8');
         return path;
     }
     // ── Core fetch ──────────────────────────────────────────────────────────────
-    /**
-     * Fetches raw file content from a dso-* repo on the release/{projectId} branch.
-     * Uses GITHUB_TOKEN for auth — works for repos within the same org that the
-     * token can read (internal / public repos, or private with org-level secret).
-     *
-     * Returns null on any error (404, auth failure, network) — always safe to call.
-     */
-    static async fetch(dsoRepo, projectId, filename) {
+    static async fetch(dsoRepo, projectId, serviceId, filename) {
         const org = process.env.GITHUB_REPOSITORY_OWNER ?? this.orgFromRepo();
-        const branch = `release/${projectId}`;
+        // Branch is per-repo: release/{projectId}-{serviceId} (e.g. release/gha-demo-api-ecs)
+        const repoId = `${projectId}-${serviceId}`;
+        const branch = `release/${repoId}`;
         const url = `https://api.github.com/repos/${org}/${dsoRepo}/contents/${filename}?ref=${branch}`;
         const token = process.env.GITHUB_TOKEN ?? '';
         const headers = {
@@ -5657,7 +5680,7 @@ class SecurityConfigLoader {
         try {
             const res = await fetch(url, { headers });
             if (res.status === 404) {
-                core.info(`[SecurityConfigLoader] No exceptions found for ${projectId} in ${dsoRepo} ` +
+                core.info(`[SecurityConfigLoader] No exceptions found for ${repoId} in ${dsoRepo} ` +
                     `(branch: ${branch}, file: ${filename}) — running with defaults`);
                 return null;
             }
@@ -5667,7 +5690,7 @@ class SecurityConfigLoader {
                 return null;
             }
             const content = await res.text();
-            core.info(`[SecurityConfigLoader] Loaded exceptions for ${projectId} from ` +
+            core.info(`[SecurityConfigLoader] Loaded exceptions for ${repoId} from ` +
                 `${dsoRepo} (branch: ${branch}, file: ${filename})`);
             return content;
         }
@@ -6188,6 +6211,224 @@ class TerraformStateCollector {
 }
 exports.TerraformStateCollector = TerraformStateCollector;
 //# sourceMappingURL=TerraformStateCollector.js.map
+
+/***/ }),
+
+/***/ 40792:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TerragruntStateSummary = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const exec = __importStar(__nccwpck_require__(95236));
+const Logger_1 = __nccwpck_require__(26747);
+/**
+ * Pulls the Terraform state after a Terragrunt apply using:
+ *   terragrunt --working-dir <dir> run --all show -json
+ *
+ * Each module outputs a terraform show JSON blob. We parse
+ * `values.root_module.resources[]` from each to build a complete
+ * picture of all managed resources across all modules.
+ *
+ * Writes a Job Summary table grouped by resource type.
+ */
+class TerragruntStateSummary {
+    /**
+     * Runs `terragrunt run --all show -json` in the given working dir
+     * and returns parsed resources per module.
+     */
+    static async fetchState(workingDir) {
+        let stdout = '';
+        let stderr = '';
+        const exitCode = await exec.exec('terragrunt', ['--working-dir', workingDir, '--non-interactive', 'run', '--all', 'show', '-json'], {
+            ignoreReturnCode: true,
+            listeners: {
+                stdout: (d) => { stdout += d.toString(); },
+                stderr: (d) => { stderr += d.toString(); },
+            },
+        });
+        if (exitCode !== 0) {
+            Logger_1.Logger.warn(`TerragruntStateSummary: show -json exited with ${exitCode} — ${stderr.slice(0, 200)}`);
+        }
+        return this.parseOutput(stdout);
+    }
+    /**
+     * Parses the combined output of `terragrunt run --all show -json`.
+     * Each module outputs a JSON blob preceded by its path in stderr/stdout.
+     * We split on JSON object boundaries and parse each blob individually.
+     */
+    static parseOutput(output) {
+        const results = [];
+        // Extract all top-level JSON objects from the mixed output
+        // Terragrunt may prefix each with "Group N\n  /path/to/module:\n"
+        const jsonBlobs = this.extractJsonBlobs(output);
+        for (const { path, json } of jsonBlobs) {
+            try {
+                const parsed = JSON.parse(json);
+                const resources = this.extractResources(parsed);
+                if (resources.length > 0 || path) {
+                    results.push({ modulePath: path, resources });
+                }
+            }
+            catch {
+                // Non-JSON blob (headers, warnings) — skip
+            }
+        }
+        return results;
+    }
+    static extractJsonBlobs(output) {
+        const blobs = [];
+        const lines = output.split('\n');
+        let currentPath = '';
+        let buffer = '';
+        let depth = 0;
+        let inJson = false;
+        for (const line of lines) {
+            // Detect module path lines: "  /path/to/module:" or "path/to/module:"
+            const pathMatch = line.match(/^\s{0,4}([\w./\-]+):\s*$/);
+            if (pathMatch && !inJson) {
+                currentPath = pathMatch[1].trim();
+                continue;
+            }
+            // Start of JSON object
+            if (line.trim().startsWith('{') && !inJson) {
+                inJson = true;
+                buffer = '';
+                depth = 0;
+            }
+            if (inJson) {
+                buffer += line + '\n';
+                for (const ch of line) {
+                    if (ch === '{')
+                        depth++;
+                    if (ch === '}')
+                        depth--;
+                }
+                // Complete JSON object
+                if (depth === 0 && buffer.trim()) {
+                    blobs.push({ path: currentPath, json: buffer.trim() });
+                    buffer = '';
+                    inJson = false;
+                    currentPath = '';
+                }
+            }
+        }
+        return blobs;
+    }
+    static extractResources(tfShow) {
+        const resources = [];
+        const values = tfShow['values'];
+        if (!values?.root_module)
+            return resources;
+        const allResources = [
+            ...(values.root_module.resources ?? []),
+            ...(values.root_module.child_modules ?? []).flatMap(m => m.resources ?? []),
+        ];
+        for (const r of allResources) {
+            // Skip data sources
+            if (r.address?.startsWith('data.'))
+                continue;
+            resources.push({
+                address: r.address,
+                type: r.type,
+                name: r.name,
+                module: r.module_address,
+                provider: r.provider_name?.split('/').pop() ?? 'unknown',
+            });
+        }
+        return resources;
+    }
+    // ── Job Summary ────────────────────────────────────────────────────────────
+    static toMarkdown(summaries) {
+        const allResources = summaries.flatMap(s => s.resources);
+        if (allResources.length === 0)
+            return '';
+        // Group by resource type
+        const byType = new Map();
+        for (const r of allResources) {
+            const list = byType.get(r.type) ?? [];
+            list.push(r);
+            byType.set(r.type, list);
+        }
+        const lines = [
+            '## 📦 Managed Infrastructure — Current State',
+            '',
+            `> **${allResources.length} resources** across **${summaries.length} module${summaries.length !== 1 ? 's' : ''}**`,
+            '',
+        ];
+        // Summary table by type
+        lines.push('| Resource Type | Count |', '|---------------|------:|');
+        for (const [type, resources] of [...byType.entries()].sort()) {
+            lines.push(`| \`${type}\` | ${resources.length} |`);
+        }
+        lines.push('');
+        // Per-module details (collapsed)
+        for (const summary of summaries) {
+            if (summary.resources.length === 0)
+                continue;
+            lines.push(`### 📁 \`${summary.modulePath || 'root'}\``, '');
+            for (const r of summary.resources) {
+                lines.push(`- \`${r.address}\``);
+            }
+            lines.push('');
+        }
+        return lines.join('\n');
+    }
+    static async writeSummary(workingDir) {
+        try {
+            core.info('TerragruntStateSummary: pulling state via show -json...');
+            const summaries = await this.fetchState(workingDir);
+            const total = summaries.flatMap(s => s.resources).length;
+            if (total === 0) {
+                Logger_1.Logger.warn('TerragruntStateSummary: no resources found in state');
+                return;
+            }
+            Logger_1.Logger.info(`TerragruntStateSummary: ${total} resources across ${summaries.length} modules`);
+            core.summary.addRaw(this.toMarkdown(summaries) + '\n\n---\n\n');
+            await core.summary.write();
+        }
+        catch (err) {
+            Logger_1.Logger.warn(`TerragruntStateSummary: failed — ${err.message}`);
+        }
+    }
+}
+exports.TerragruntStateSummary = TerragruntStateSummary;
+//# sourceMappingURL=TerragruntStateSummary.js.map
 
 /***/ }),
 
@@ -141055,6 +141296,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -151381,6 +151640,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -154596,132 +154981,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -154792,24 +155051,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
