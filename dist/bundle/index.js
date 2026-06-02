@@ -2237,12 +2237,14 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DeployStage = void 0;
 const core = __importStar(__nccwpck_require__(37484));
+const exec = __importStar(__nccwpck_require__(95236));
 const AbstractDeployStage_1 = __nccwpck_require__(9816);
 const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const ActionsType_1 = __nccwpck_require__(15515);
 const StageTransfer_1 = __nccwpck_require__(24734);
 const PlanSummary_1 = __nccwpck_require__(60566);
+const ApplySummary_1 = __nccwpck_require__(48763);
 function containsSubcommand(cmd, sub) {
     return cmd.trim().split(/\s+/).includes(sub);
 }
@@ -2321,11 +2323,33 @@ class DeployStage extends AbstractDeployStage_1.AbstractDeployStage {
             await this.showPlanSummary();
         }
         const end = this.startGroup(`deploy: ${stage.name}`);
+        let applyOutput = '';
         try {
-            await super.run(stage);
+            // Capture apply output for post-apply summary
+            if (this.config.type === ActionsType_1.ActionsType.TERRAFORM) {
+                const originalCommands = stage.commands ?? [];
+                for (const cmd of originalCommands) {
+                    const parts = cmd.trim().split(/\s+/);
+                    let stdout = '';
+                    await exec.exec(parts[0], parts.slice(1), {
+                        listeners: {
+                            stdout: (d) => { stdout += d.toString(); process.stdout.write(d); },
+                            stderr: (d) => { process.stderr.write(d); },
+                        },
+                    });
+                    applyOutput += stdout + '\n';
+                }
+            }
+            else {
+                await super.run(stage);
+            }
         }
         finally {
             end();
+            // Write apply summary after commands complete
+            if (this.config.type === ActionsType_1.ActionsType.TERRAFORM && applyOutput) {
+                await ApplySummary_1.ApplySummary.writeSummary(applyOutput);
+            }
         }
     }
 }
@@ -3842,6 +3866,159 @@ function validateDeployForBranch(deployEnv, branchType, accounts) {
 
 /***/ }),
 
+/***/ 48763:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ApplySummary = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const Logger_1 = __nccwpck_require__(26747);
+/**
+ * Parses the stdout of a `terraform apply` or `terragrunt run --all apply`
+ * and extracts which resources were actually created/updated/destroyed.
+ *
+ * Patterns matched:
+ *   <addr>: Creation complete after Xs [id=...]
+ *   <addr>: Modifications complete after Xs [id=...]
+ *   <addr>: Destruction complete after Xs
+ *   Apply complete! Resources: X added, Y changed, Z destroyed.
+ *   (module prefix stripped for run --all output)
+ */
+class ApplySummary {
+    static parse(output) {
+        const result = {
+            created: [], updated: [], deleted: [], replaced: [],
+            totalAdded: 0, totalChanged: 0, totalDestroyed: 0,
+        };
+        const lines = output.split('\n');
+        for (const line of lines) {
+            // Strip Terragrunt module prefix: "path/to/module: aws_..." → "aws_..."
+            const stripped = line.replace(/^[^\s]+:\s+/, '').trim();
+            // Creation complete
+            const created = stripped.match(/^(.+?):\s+Creation complete after (\d+\w+)/);
+            if (created) {
+                result.created.push({ address: created[1].trim(), action: 'created', elapsed: created[2] });
+                continue;
+            }
+            // Modifications complete
+            const updated = stripped.match(/^(.+?):\s+Modifications complete after (\d+\w+)/);
+            if (updated) {
+                result.updated.push({ address: updated[1].trim(), action: 'updated', elapsed: updated[2] });
+                continue;
+            }
+            // Destruction complete
+            const deleted = stripped.match(/^(.+?):\s+Destruction complete after (\d+\w+)/);
+            if (deleted) {
+                result.deleted.push({ address: deleted[1].trim(), action: 'deleted', elapsed: deleted[2] });
+                continue;
+            }
+            // Apply complete! Resources: X added, Y changed, Z destroyed.
+            const totals = stripped.match(/Apply complete! Resources: (\d+) added, (\d+) changed, (\d+) destroyed/);
+            if (totals) {
+                result.totalAdded += parseInt(totals[1], 10);
+                result.totalChanged += parseInt(totals[2], 10);
+                result.totalDestroyed += parseInt(totals[3], 10);
+                continue;
+            }
+        }
+        return result;
+    }
+    static toMarkdown(r) {
+        const total = r.totalAdded + r.totalChanged + r.totalDestroyed;
+        if (total === 0 && r.created.length === 0 && r.updated.length === 0 && r.deleted.length === 0) {
+            return '## ✅ Apply Complete\n\nNo infrastructure changes were made.\n';
+        }
+        const lines = [
+            '## ✅ Apply Complete — Resource Changes',
+            '',
+            '| Action | Count |',
+            '|--------|------:|',
+            `| ➕ Created  | ${r.totalAdded}     |`,
+            `| 🔄 Updated  | ${r.totalChanged}   |`,
+            `| 🗑️ Destroyed | ${r.totalDestroyed} |`,
+            '',
+        ];
+        if (r.created.length > 0) {
+            lines.push('### ➕ Created', '');
+            for (const res of r.created) {
+                lines.push(`- \`${res.address}\`${res.elapsed ? ` *(${res.elapsed})*` : ''}`);
+            }
+            lines.push('');
+        }
+        if (r.updated.length > 0) {
+            lines.push('### 🔄 Updated', '');
+            for (const res of r.updated) {
+                lines.push(`- \`${res.address}\`${res.elapsed ? ` *(${res.elapsed})*` : ''}`);
+            }
+            lines.push('');
+        }
+        if (r.deleted.length > 0) {
+            lines.push('### 🗑️ Destroyed', '');
+            for (const res of r.deleted) {
+                lines.push(`- \`${res.address}\`${res.elapsed ? ` *(${res.elapsed})*` : ''}`);
+            }
+            lines.push('');
+        }
+        return lines.join('\n');
+    }
+    static logInline(r) {
+        Logger_1.Logger.info(`Apply complete: ` +
+            `+${r.totalAdded} added  ` +
+            `~${r.totalChanged} changed  ` +
+            `-${r.totalDestroyed} destroyed`);
+    }
+    static async writeSummary(output) {
+        try {
+            const result = this.parse(output);
+            this.logInline(result);
+            core.summary.addRaw(this.toMarkdown(result) + '\n\n---\n\n');
+            await core.summary.write();
+        }
+        catch (err) {
+            Logger_1.Logger.warn(`ApplySummary: could not parse apply output: ${err.message}`);
+        }
+    }
+}
+exports.ApplySummary = ApplySummary;
+//# sourceMappingURL=ApplySummary.js.map
+
+/***/ }),
+
 /***/ 38069:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -5243,7 +5420,7 @@ class PlanSummary {
             Logger_1.Logger.warn('PlanSummary: no plan files to summarize');
             return;
         }
-        let hasContent = false;
+        const results = [];
         for (const filePath of planFiles) {
             if (!fs.existsSync(filePath)) {
                 Logger_1.Logger.warn(`PlanSummary: file not found: ${filePath}`);
@@ -5255,16 +5432,45 @@ class PlanSummary {
                 if (modulePath)
                     result.modulePath = modulePath;
                 this.logInline(result);
-                core.summary.addRaw(this.toMarkdown(result) + '\n\n---\n\n');
-                hasContent = true;
+                results.push(result);
             }
             catch (err) {
                 Logger_1.Logger.warn(`PlanSummary: could not parse ${filePath}: ${err.message}`);
             }
         }
-        if (hasContent) {
-            await core.summary.write();
+        if (results.length === 0)
+            return;
+        // ── Global totals banner (shown first, above per-module details) ──────────
+        const totals = results.reduce((acc, r) => ({
+            create: acc.create + r.toCreate.length,
+            update: acc.update + r.toUpdate.length,
+            delete: acc.delete + r.toDelete.length,
+            replace: acc.replace + r.toReplace.length,
+        }), { create: 0, update: 0, delete: 0, replace: 0 });
+        const totalChanges = totals.create + totals.update + totals.delete + totals.replace;
+        const modules = results.length;
+        const banner = [
+            '## 📋 Terraform Plan Summary',
+            '',
+            `> **${modules} module${modules !== 1 ? 's' : ''}** &nbsp;|&nbsp; ` +
+                `**${totalChanges} change${totalChanges !== 1 ? 's' : ''}**`,
+            '',
+            '| Action | Count |',
+            '|--------|------:|',
+            `| ➕ Create  | ${totals.create}  |`,
+            `| 🔄 Update  | ${totals.update}  |`,
+            `| 🗑️ Delete  | ${totals.delete}  |`,
+            `| ♻️ Replace | ${totals.replace} |`,
+            '',
+            '---',
+            '',
+        ].join('\n');
+        core.summary.addRaw(banner);
+        // ── Per-module details ────────────────────────────────────────────────────
+        for (const result of results) {
+            core.summary.addRaw(this.toMarkdown(result) + '\n\n---\n\n');
         }
+        await core.summary.write();
     }
 }
 exports.PlanSummary = PlanSummary;
