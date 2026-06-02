@@ -236,13 +236,25 @@ class DockerECR {
         if (!manifest || manifest === 'None') {
             throw new Error(`ECR image not found: ${repo}:${srcTag}`);
         }
-        await exec.exec('aws', [
+        let putOutput = '';
+        const putCode = await exec.exec('aws', [
             'ecr', 'put-image',
             '--region', this.region,
             '--repository-name', repo,
             '--image-tag', destTag,
             '--image-manifest', manifest,
-        ]);
+        ], {
+            ignoreReturnCode: true,
+            listeners: { stderr: (d) => { putOutput += d.toString(); } },
+        });
+        // ImageAlreadyExistsException: tag already points to the same digest — idempotent, treat as success.
+        if (putCode !== 0 && putOutput.includes('ImageAlreadyExistsException')) {
+            core.info(`ECR tag '${destTag}' already points to the same digest — promotion is a no-op ✅`);
+            return;
+        }
+        if (putCode !== 0) {
+            throw new Error(`ECR put-image failed (exit ${putCode}): ${putOutput}`);
+        }
     }
     /** Checks existence via ECR API — no docker daemon required. */
     async checkFile(imageRef) {
@@ -1471,7 +1483,7 @@ class CheckovTfStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     }
     /** Parses skip-check list from dso-checkov/release/{projectId}/checkov.yaml */
     async loadCheckovExceptions() {
-        const raw = await SecurityConfigLoader_1.SecurityConfigLoader.fetchCheckovConfig(this.config.metadata.projectId);
+        const raw = await SecurityConfigLoader_1.SecurityConfigLoader.fetchCheckovConfig(this.config.metadata.projectId, this.config.metadata.serviceId);
         if (!raw)
             return [];
         try {
@@ -1574,7 +1586,7 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             // ── Load per-project exceptions from dso-semgrep repo ───────────────────
             // Branch: release/{projectId}  File: .semgrepignore
             // Semgrep reads .semgrepignore automatically from the working directory.
-            const semgrepIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchSemgrepIgnore(this.config.metadata.projectId);
+            const semgrepIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchSemgrepIgnore(this.config.metadata.projectId, this.config.metadata.serviceId);
             if (semgrepIgnore) {
                 (__nccwpck_require__(79896).writeFileSync)('.semgrepignore', semgrepIgnore, 'utf8');
                 core.info('[SecurityConfigLoader] .semgrepignore applied from dso-semgrep');
@@ -1814,7 +1826,7 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             // ── Load per-project exceptions from dso-trivy repo ──────────────────────
             // Branch: release/{projectId}  File: .trivyignore
             // Trivy reads .trivyignore automatically from the working directory.
-            const trivyIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchTrivyIgnore(this.config.metadata.projectId);
+            const trivyIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchTrivyIgnore(this.config.metadata.projectId, this.config.metadata.serviceId);
             if (trivyIgnore) {
                 (__nccwpck_require__(79896).writeFileSync)('.trivyignore', trivyIgnore, 'utf8');
                 core.info('[SecurityConfigLoader] .trivyignore applied from dso-trivy');
@@ -2483,7 +2495,12 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const cluster = resolve(cfg.cluster);
         const service = resolve(cfg.service);
         const container = resolve(cfg.container);
-        const imageTag = cfg.image_tag ? resolve(cfg.image_tag) : env;
+        // image_tag resolution:
+        //   1. cfg.image_tag set and resolves to non-empty → use it (e.g. $SHA_TAG = sha-052c920)
+        //   2. cfg.image_tag resolves to empty (env var not set) → fall back to env name (dev/qa/prod)
+        //   3. cfg.image_tag not set → env name
+        const resolvedTag = cfg.image_tag ? resolve(cfg.image_tag) : '';
+        const imageTag = resolvedTag || env;
         const waitStable = cfg.wait_for_stability !== false;
         const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
         // ── Assume ECS deploy role from GitHub environment secret ─────────────────
@@ -2560,11 +2577,14 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         newArn = newArn.trim();
         core.info(`   new revision: ${newArn}`);
         // ── 4. Update ECS service ─────────────────────────────────────────────────
+        // --force-new-deployment cancels any previous rolling deployment and starts
+        // a fresh one, preventing the service from cycling old failing task defs.
         await exec.exec('aws', [
             'ecs', 'update-service',
             '--cluster', cluster,
             '--service', service,
             '--task-definition', newArn,
+            '--force-new-deployment',
             '--region', region,
         ]);
         // ── 5. Wait for service stability ─────────────────────────────────────────
@@ -2889,60 +2909,72 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
         if (planFiles.length === 0)
             return;
         try {
-            // Install OpenInfraQuote binary
-            core.info('[openinfraquote] installing...');
+            // ── Install OpenInfraQuote binary ─────────────────────────────────────
+            // Use GITHUB_TOKEN to avoid API rate limits in CI (60 req/hr unauth vs 5000 auth)
+            core.info('[openinfraquote] fetching latest release...');
+            const token = process.env.GITHUB_TOKEN ?? '';
+            const authHeader = token ? `-H "Authorization: Bearer ${token}"` : '';
             const { stdout: latestJson } = await exec.getExecOutput('bash', ['-c',
-                'curl -sSfL https://api.github.com/repos/terrateamio/openinfraquote/releases/latest',
+                `curl -sSfL ${authHeader} https://api.github.com/repos/terrateamio/openinfraquote/releases/latest`,
             ], { silent: true });
             const release = JSON.parse(latestJson);
+            if (!release.assets?.length) {
+                throw new Error(`GitHub API returned no assets — possible rate limit. Response: ${latestJson.slice(0, 200)}`);
+            }
             const asset = release.assets.find(a => a.name.includes('linux') && a.name.includes('amd64'));
             if (!asset)
                 throw new Error('openinfraquote linux/amd64 asset not found in latest release');
+            core.info(`[openinfraquote] installing ${release.tag_name ?? 'latest'}...`);
             await exec.exec('bash', ['-c',
                 `curl -sSfL "${asset.browser_download_url}" | tar -xz -C /usr/local/bin && chmod +x /usr/local/bin/oiq`,
             ]);
-            // Download pricing sheet (required by oiq)
+            // ── Download pricing sheet ────────────────────────────────────────────
             core.info('[openinfraquote] downloading price sheet...');
             await exec.exec('bash', ['-c',
                 'curl -sSfL https://oiq.terrateam.io/prices.csv.gz | gunzip > /tmp/oiq-prices.csv',
             ]);
-            const fsModule = await Promise.resolve().then(() => __importStar(__nccwpck_require__(79896)));
-            const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-            const lines = ['## 💰 Cost Estimate'];
-            // ── Part 1: cost of pending plan changes (JSON → filtered report) ───────
-            const planFileArgs = planFiles.join(' ');
+            // Detect region from env or default to us-east-2
+            const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
+            const lines = ['## 💰 Cost Estimate (OpenInfraQuote)', ''];
+            // ── Part 1: pending plan changes ──────────────────────────────────────
+            const planFileArgs = planFiles.map(f => `"${f}"`).join(' ');
             const { stdout: planJson } = await exec.getExecOutput('bash', ['-c',
-                `oiq match --pricesheet /tmp/oiq-prices.csv ${planFileArgs} | oiq price --region us-east-2 --format=json`
+                `oiq match --pricesheet /tmp/oiq-prices.csv ${planFileArgs} | oiq price --region ${region} --format=json`
             ], { ignoreReturnCode: true, silent: true });
             lines.push('### 🔄 Pending Changes');
-            const planReport = this.buildCostReport(planJson, planFiles.length, 'plan file');
-            lines.push(...planReport);
-            // ── Part 2: cost of already-deployed infrastructure (from state) ──────
-            core.info('[openinfraquote] collecting module states for current infra cost...');
+            lines.push(...this.buildCostReport(planJson, planFiles.length, 'plan file'));
+            // ── Part 2: current deployed state ───────────────────────────────────
+            core.info('[openinfraquote] pulling module states for current infra cost...');
             const stateFiles = await TerraformStateCollector_1.TerraformStateCollector.collect();
             if (stateFiles.length > 0) {
-                const stateFileArgs = stateFiles.map(s => s.filePath).join(' ');
+                const stateFileArgs = stateFiles.map(s => `"${s.filePath}"`).join(' ');
                 const { stdout: stateJson } = await exec.getExecOutput('bash', ['-c',
-                    `oiq match --pricesheet /tmp/oiq-prices.csv ${stateFileArgs} | oiq price --region us-east-2 --format=json`
+                    `oiq match --pricesheet /tmp/oiq-prices.csv ${stateFileArgs} | oiq price --region ${region} --format=json`
                 ], { ignoreReturnCode: true, silent: true });
                 lines.push('');
                 lines.push('### 🏗️ Current Deployed Infrastructure');
-                const stateReport = this.buildCostReport(stateJson, stateFiles.length, 'module state');
-                lines.push(...stateReport);
-                if (stateFiles.length > 0) {
-                    lines.push(`> Modules: ${stateFiles.map(s => s.modulePath.split('/').slice(-2).join('/')).join(', ')}`);
-                }
+                lines.push(...this.buildCostReport(stateJson, stateFiles.length, 'module state'));
+                lines.push(`> Modules: ${stateFiles.map(s => s.modulePath.split('/').slice(-2).join('/')).join(', ')}`);
+            }
+            else {
+                core.info('[openinfraquote] no module states found — skipping current infra cost');
             }
             lines.push('');
-            lines.push(`> [OpenInfraQuote](https://github.com/terrateamio/openinfraquote)`);
-            if (summaryPath) {
-                fsModule.appendFileSync(summaryPath, lines.join('\n') + '\n');
-                core.info(`[openinfraquote] cost estimate written to Job Summary`);
-            }
+            lines.push(`> Powered by [OpenInfraQuote](https://github.com/terrateamio/openinfraquote) — region: \`${region}\``);
+            // Write to Job Summary using core.summary (consistent with other summaries)
+            core.summary.addRaw(lines.join('\n') + '\n\n---\n\n');
+            await core.summary.write();
+            core.info('[openinfraquote] cost estimate written to Job Summary');
         }
         catch (err) {
             // Non-fatal — cost estimate is best-effort, never blocks the pipeline
             core.warning(`[openinfraquote] skipped: ${err.message}`);
+            // Write a visible notice in the summary so users know why costs are missing
+            try {
+                core.summary.addRaw(`## 💰 Cost Estimate\n> ⚠️ Skipped: ${err.message}\n\n---\n\n`);
+                await core.summary.write();
+            }
+            catch { /* ignore summary write errors */ }
         }
     }
 }
@@ -5608,64 +5640,47 @@ exports.SecurityConfigLoader = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const fs = __importStar(__nccwpck_require__(79896));
 /**
- * Loads per-project security exception configs from dedicated dso-* repos.
+ * Loads per-repo security exception configs from dedicated dso-* repos.
  *
  * Convention:
- *   Repo:   dso-{tool}          (dso-trivy / dso-checkov / dso-semgrep)
- *   Branch: release/{projectId} (e.g. release/demo-api)
- *   File:   tool-specific       (.trivyignore / checkov.yaml / .semgrepignore)
+ *   Repo:   dso-{tool}                       (dso-trivy / dso-checkov / dso-semgrep)
+ *   Branch: release/{projectId}-{serviceId}  (e.g. release/gha-demo-api-ecs)
+ *   File:   tool-specific                    (.trivyignore / checkov.yaml / .semgrepignore)
+ *
+ * Branch is per-repo (projectId + serviceId) not per-team (projectId only).
+ * This ensures exceptions are isolated — a CVE suppressed in one service
+ * does not silently suppress it in all other services of the same team.
  *
  * The lib fetches the file via GitHub API using GITHUB_TOKEN.
  * If the repo, branch, or file does not exist the tool runs with no exceptions
  * — missing config is never an error.
  *
  * Usage (applied automatically by TrivyStage, CheckovStage, SemgrepStage):
- *   const ignore = await SecurityConfigLoader.fetchTrivyIgnore(projectId);
+ *   const ignore = await SecurityConfigLoader.fetchTrivyIgnore(projectId, serviceId);
  *   if (ignore) fs.writeFileSync('.trivyignore', ignore);
  */
 class SecurityConfigLoader {
     // ── Public helpers ──────────────────────────────────────────────────────────
-    /**
-     * Fetches the .trivyignore file for the given project.
-     * Returns the file content or null if not found.
-     */
-    static async fetchTrivyIgnore(projectId) {
-        return this.fetch('dso-trivy', projectId, '.trivyignore');
+    static async fetchTrivyIgnore(projectId, serviceId) {
+        return this.fetch('dso-trivy', projectId, serviceId, '.trivyignore');
     }
-    /**
-     * Fetches checkov.yaml for the given project.
-     * Returns the file content or null if not found.
-     */
-    static async fetchCheckovConfig(projectId) {
-        return this.fetch('dso-checkov', projectId, 'checkov.yaml');
+    static async fetchCheckovConfig(projectId, serviceId) {
+        return this.fetch('dso-checkov', projectId, serviceId, 'checkov.yaml');
     }
-    /**
-     * Fetches .semgrepignore for the given project.
-     * Returns the file content or null if not found.
-     */
-    static async fetchSemgrepIgnore(projectId) {
-        return this.fetch('dso-semgrep', projectId, '.semgrepignore');
+    static async fetchSemgrepIgnore(projectId, serviceId) {
+        return this.fetch('dso-semgrep', projectId, serviceId, '.semgrepignore');
     }
-    /**
-     * Writes a fetched config to a temp file and returns the path.
-     * Returns null if content is null (no config found).
-     */
     static writeTempConfig(content, filename) {
         const path = `/tmp/${filename}`;
         fs.writeFileSync(path, content, 'utf8');
         return path;
     }
     // ── Core fetch ──────────────────────────────────────────────────────────────
-    /**
-     * Fetches raw file content from a dso-* repo on the release/{projectId} branch.
-     * Uses GITHUB_TOKEN for auth — works for repos within the same org that the
-     * token can read (internal / public repos, or private with org-level secret).
-     *
-     * Returns null on any error (404, auth failure, network) — always safe to call.
-     */
-    static async fetch(dsoRepo, projectId, filename) {
+    static async fetch(dsoRepo, projectId, serviceId, filename) {
         const org = process.env.GITHUB_REPOSITORY_OWNER ?? this.orgFromRepo();
-        const branch = `release/${projectId}`;
+        // Branch is per-repo: release/{projectId}-{serviceId} (e.g. release/gha-demo-api-ecs)
+        const repoId = `${projectId}-${serviceId}`;
+        const branch = `release/${repoId}`;
         const url = `https://api.github.com/repos/${org}/${dsoRepo}/contents/${filename}?ref=${branch}`;
         const token = process.env.GITHUB_TOKEN ?? '';
         const headers = {
@@ -5677,7 +5692,7 @@ class SecurityConfigLoader {
         try {
             const res = await fetch(url, { headers });
             if (res.status === 404) {
-                core.info(`[SecurityConfigLoader] No exceptions found for ${projectId} in ${dsoRepo} ` +
+                core.info(`[SecurityConfigLoader] No exceptions found for ${repoId} in ${dsoRepo} ` +
                     `(branch: ${branch}, file: ${filename}) — running with defaults`);
                 return null;
             }
@@ -5687,7 +5702,7 @@ class SecurityConfigLoader {
                 return null;
             }
             const content = await res.text();
-            core.info(`[SecurityConfigLoader] Loaded exceptions for ${projectId} from ` +
+            core.info(`[SecurityConfigLoader] Loaded exceptions for ${repoId} from ` +
                 `${dsoRepo} (branch: ${branch}, file: ${filename})`);
             return content;
         }
@@ -6187,7 +6202,7 @@ class TerraformStateCollector {
         // Try `terragrunt show -json` first (reads from Terragrunt cache),
         // then fall back to plain `terraform show -json` for raw TF dirs.
         await exec.exec('bash', ['-c',
-            'terragrunt show -- -json 2>/dev/null || terraform show -json 2>/dev/null'
+            'terragrunt show -json 2>/dev/null || terraform show -json 2>/dev/null'
         ], opts);
         const json = stdout.trim();
         if (!json || !json.startsWith('{'))
@@ -141353,6 +141368,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -151679,6 +151712,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -154894,132 +155053,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155090,24 +155123,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
