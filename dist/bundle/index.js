@@ -2496,14 +2496,28 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         if (!cfg) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Stage '${stage.name}' requires an 'ecs_deploy' config block`);
         }
-        // ── Security gate: prod is ONLY reachable from main ──────────────────────
-        // If someone explicitly sets environment: prod on a non-main branch → fail hard.
-        // This blocks accidental or malicious prod deploys from feature/develop/release branches.
+        // ── Security gate: prod deployments ──────────────────────────────────────
+        // Two paths to prod (both require GitHub Environment gate with required reviewers):
+        //
+        //   1. Automatic: merge to main → branch routing → prod (original flow)
+        //   2. Manual:    workflow_dispatch with cfg.environment = 'prod' from any branch
+        //                 → GitHub Environment 'prod' pauses and requires approval
+        //                 → after approval → prod deploy
+        //                 → merge to main is done AFTER verifying prod (Continuous Delivery)
+        //
+        // The GitHub Environment required reviewers IS the security gate for option 2.
+        // Hard-blocking prod from non-main branches would prevent this valid workflow.
         const requestedEnv = cfg.environment;
-        if (env !== Environment_1.Environment.PROD && (requestedEnv === 'prod' || requestedEnv === 'production')) {
-            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: 'environment: prod' is only allowed on the main branch. ` +
-                `Current branch type: '${this.branchType}'. Merge to main first.`);
+        const isProdRequested = requestedEnv === 'prod' || requestedEnv === 'production';
+        const isManualDispatch = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch';
+        if (env !== Environment_1.Environment.PROD && isProdRequested && !isManualDispatch) {
+            // Auto-triggered (push/PR) on non-main branch trying to reach prod → block
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: 'environment: prod' on automated runs is only allowed on the main branch. ` +
+                `Current branch type: '${this.branchType}'. ` +
+                `For manual prod deploys use workflow_dispatch — GitHub Environment approval is required.`);
         }
+        // When manually dispatching to prod from non-main, use prod environment
+        const effectiveEnv = (isProdRequested && isManualDispatch) ? Environment_1.Environment.PROD : env;
         // ── Resolve env var references ($VAR) in config values ───────────────────
         // Allows action.yaml to use GitHub environment variables:
         //   cluster: $ECS_CLUSTER  →  process.env.ECS_CLUSTER
@@ -2517,7 +2531,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         //   2. cfg.image_tag resolves to empty (env var not set) → fall back to env name (dev/qa/prod)
         //   3. cfg.image_tag not set → env name
         const resolvedTag = cfg.image_tag ? resolve(cfg.image_tag) : '';
-        const imageTag = resolvedTag || env;
+        const imageTag = resolvedTag || effectiveEnv;
         const waitStable = cfg.wait_for_stability !== false;
         const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
         // ── Assume ECS deploy role from GitHub environment secret ─────────────────
@@ -2529,7 +2543,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             core.info(`Assuming ECS deploy role: ${deployRole}`);
             await this.assumeRole(deployRole, `ecs-${env}-${Date.now()}`);
         }
-        core.info(`\n🚀 ECS Deploy → ${env.toUpperCase()}`);
+        core.info(`\n🚀 ECS Deploy → ${effectiveEnv.toUpperCase()}${effectiveEnv !== env ? ` (manual dispatch from ${this.branchType})` : ''}`);
         core.info(`   cluster:   ${cluster}`);
         core.info(`   service:   ${service}`);
         core.info(`   image tag: :${imageTag}`);
