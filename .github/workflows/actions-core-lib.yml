@@ -37,6 +37,9 @@ jobs:
       post_deploy_enabled: ${{ steps.ActionsCoreLib.outputs.post_deploy_enabled }}
       generic_enabled:     ${{ steps.ActionsCoreLib.outputs.generic_enabled }}
       deploy_environment:  ${{ steps.ActionsCoreLib.outputs.deploy_environment }}
+      tools_java:          ${{ steps.ActionsCoreLib.outputs.tools_java }}
+      tools_maven:         ${{ steps.ActionsCoreLib.outputs.tools_maven }}
+      tools_node:          ${{ steps.ActionsCoreLib.outputs.tools_node }}
       tools_terraform:     ${{ steps.ActionsCoreLib.outputs.tools_terraform }}
       tools_terragrunt:    ${{ steps.ActionsCoreLib.outputs.tools_terragrunt }}
       ActionsCoreLib_type: ${{ steps.ActionsCoreLib.outputs.ActionsCoreLib_type }}
@@ -56,6 +59,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
+      - name: Setup Java
+        if: needs.config.outputs.tools_java != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ needs.config.outputs.tools_java }}
+      - name: Setup Maven
+        if: needs.config.outputs.tools_maven != ''
+        uses: stCarolas/setup-maven@v5
+        with:
+          maven-version: ${{ needs.config.outputs.tools_maven }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: compile
