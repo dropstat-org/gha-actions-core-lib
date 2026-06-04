@@ -1826,10 +1826,20 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             // ── Load per-project exceptions from dso-trivy repo ──────────────────────
             // Branch: release/{projectId}  File: .trivyignore
             // Trivy reads .trivyignore automatically from the working directory.
-            const trivyIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchTrivyIgnore(this.config.metadata.projectId, this.config.metadata.serviceId);
-            if (trivyIgnore) {
-                (__nccwpck_require__(79896).writeFileSync)('.trivyignore', trivyIgnore, 'utf8');
-                core.info('[SecurityConfigLoader] .trivyignore applied from dso-trivy');
+            // Load exceptions from dso-trivy — CVEs go to .trivyignore, file paths to --skip-files
+            // All excepted issues remain visible in the report (--show-suppressed) but don't fail.
+            const trivyIgnoreContent = await SecurityConfigLoader_1.SecurityConfigLoader.fetchTrivyIgnore(this.config.metadata.projectId, this.config.metadata.serviceId);
+            const skipFiles = [];
+            if (trivyIgnoreContent) {
+                const { cveLines, skipFiles: paths } = SecurityConfigLoader_1.SecurityConfigLoader.parseTrivyIgnore(trivyIgnoreContent);
+                if (cveLines.length > 0) {
+                    (__nccwpck_require__(79896).writeFileSync)('.trivyignore', cveLines.join('\n'), 'utf8');
+                    core.info(`[Trivy] ${cveLines.length} CVE exception(s) applied from dso-trivy`);
+                }
+                if (paths.length > 0) {
+                    skipFiles.push(...paths);
+                    core.info(`[Trivy] ${paths.length} file path exception(s) applied: ${paths.join(', ')}`);
+                }
             }
             let scanType = stage.trivy?.scanType ?? 'fs';
             let imageRef = stage.trivy?.imageRef;
@@ -1860,14 +1870,16 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
                 }
             }
             const target = scanType === 'image' ? imageRef : '.';
-            const code = await exec.exec('trivy', [
+            const trivyArgs = [
                 scanType,
                 '--format', 'table',
                 '--severity', SEVERITY,
                 '--exit-code', SOFT_FAIL ? '0' : '1',
-                '--show-suppressed', // show .trivyignore exceptions in report (visible but don't fail)
+                '--show-suppressed', // show excepted issues in report (visible but don't fail)
+                ...skipFiles.flatMap(f => ['--skip-files', f]),
                 target,
-            ], { ignoreReturnCode: true });
+            ];
+            const code = await exec.exec('trivy', trivyArgs, { ignoreReturnCode: true });
             this.handleResult(this.mapResult(code), stage.name, SOFT_FAIL);
             // Save the locally-built image as artifact so Publish can load it without rebuilding.
             // Only save when scan passed (or soft_fail — publish will still run in both cases).
@@ -5668,6 +5680,34 @@ class SecurityConfigLoader {
     // ── Public helpers ──────────────────────────────────────────────────────────
     static async fetchTrivyIgnore(projectId, serviceId) {
         return this.fetch('dso-trivy', projectId, serviceId, '.trivyignore');
+    }
+    /**
+     * Parses the .trivyignore file and returns two lists:
+     * - cveLines: CVE/GHSA IDs → written to .trivyignore (suppress from exit code)
+     * - skipFiles: file paths → passed as --skip-files to Trivy
+     *
+     * In the .trivyignore file, file path exceptions start with a valid path pattern
+     * (not CVE-/GHSA-/# prefix).
+     *
+     * Issues in both lists are still VISIBLE in the report (--show-suppressed)
+     * but do not cause pipeline failure.
+     */
+    static parseTrivyIgnore(content) {
+        const cveLines = [];
+        const skipFiles = [];
+        for (const raw of content.split('\n')) {
+            const line = raw.split('#')[0].trim(); // strip comments
+            if (!line)
+                continue;
+            if (/^(CVE-|GHSA-)/i.test(line)) {
+                cveLines.push(line);
+            }
+            else {
+                // Treat as file path exception
+                skipFiles.push(line);
+            }
+        }
+        return { cveLines, skipFiles };
     }
     static async fetchCheckovConfig(projectId, serviceId) {
         return this.fetch('dso-checkov', projectId, serviceId, 'checkov.yaml');
