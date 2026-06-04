@@ -236,13 +236,25 @@ class DockerECR {
         if (!manifest || manifest === 'None') {
             throw new Error(`ECR image not found: ${repo}:${srcTag}`);
         }
-        await exec.exec('aws', [
+        let putOutput = '';
+        const putCode = await exec.exec('aws', [
             'ecr', 'put-image',
             '--region', this.region,
             '--repository-name', repo,
             '--image-tag', destTag,
             '--image-manifest', manifest,
-        ]);
+        ], {
+            ignoreReturnCode: true,
+            listeners: { stderr: (d) => { putOutput += d.toString(); } },
+        });
+        // ImageAlreadyExistsException: tag already points to the same digest — idempotent, treat as success.
+        if (putCode !== 0 && putOutput.includes('ImageAlreadyExistsException')) {
+            core.info(`ECR tag '${destTag}' already points to the same digest — promotion is a no-op ✅`);
+            return;
+        }
+        if (putCode !== 0) {
+            throw new Error(`ECR put-image failed (exit ${putCode}): ${putOutput}`);
+        }
     }
     /** Checks existence via ECR API — no docker daemon required. */
     async checkFile(imageRef) {
@@ -3298,11 +3310,23 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.MasterTagRelease = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const AbstractReleaseStage_1 = __nccwpck_require__(10848);
+const GitVersionResolver_1 = __nccwpck_require__(46601);
 class MasterTagRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     async onMaster(_stage) {
-        const tag = `v${this.config.metadata.version}`;
-        core.info(`MasterTagRelease: creating git tag ${tag}`);
+        const resolved = await GitVersionResolver_1.GitVersionResolver.resolve(this.config.metadata.version, this.config.metadata.commitHash);
+        const tag = `v${resolved}`;
+        // Skip if tag already exists — idempotent
         const { execSync } = await Promise.resolve().then(() => __importStar(__nccwpck_require__(35317)));
+        try {
+            execSync(`git ls-remote --tags origin ${tag}`, { stdio: 'pipe' });
+            const existing = execSync(`git ls-remote --tags origin ${tag}`, { encoding: 'utf8' }).trim();
+            if (existing) {
+                core.info(`MasterTagRelease: tag ${tag} already exists — skipping`);
+                return;
+            }
+        }
+        catch { /* tag doesn't exist, proceed */ }
+        core.info(`MasterTagRelease: creating git tag ${tag}`);
         execSync(`git tag ${tag}`);
         execSync(`git push origin ${tag}`);
     }
@@ -4568,6 +4592,147 @@ class FileUtil {
 }
 exports.FileUtil = FileUtil;
 //# sourceMappingURL=FileUtil.js.map
+
+/***/ }),
+
+/***/ 46601:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitVersionResolver = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const exec = __importStar(__nccwpck_require__(95236));
+const ImageSHA_1 = __nccwpck_require__(2870);
+/**
+ * Resolves the semantic version using GitVersion (if available) or falls back
+ * to a date-based version. Combines with the git SHA for uniqueness.
+ *
+ * Output format: {major}.{minor}.{patch}-sha-{7-char-sha}
+ * Examples:
+ *   1.2.0-sha-abc1234   (GitVersion available)
+ *   2026.06.04-sha-abc1234  (fallback: date-based)
+ *
+ * GitVersion derives the version from:
+ *   - Branch name patterns (feature/* → minor, hotfix/* → patch, release/x.y → tag)
+ *   - Existing git tags
+ *   - No commit message conventions required
+ *
+ * If version is explicitly set in action.yaml metadata, that takes priority.
+ */
+class GitVersionResolver {
+    /**
+     * Resolves the version for this build.
+     * Priority:
+     *   1. Explicit version in action.yaml metadata → use as-is (backward compat)
+     *   2. GitVersion installed → {semver}-sha-{sha}
+     *   3. Fallback → {YYYY.MM.DD}-sha-{sha}
+     */
+    static async resolve(explicitVersion, commitSha) {
+        const sha = (0, ImageSHA_1.shortSHA)(commitSha ?? process.env.GITHUB_SHA ?? 'unknown');
+        const shaTag = `sha-${sha}`;
+        // If explicit version set in action.yaml → append sha for uniqueness
+        if (explicitVersion && explicitVersion !== '0.0.0') {
+            return `${explicitVersion}-${shaTag}`;
+        }
+        // Try GitVersion
+        const semver = await this.tryGitVersion();
+        if (semver) {
+            core.info(`[GitVersion] resolved: ${semver}-${shaTag}`);
+            return `${semver}-${shaTag}`;
+        }
+        // Fallback: date-based
+        const date = new Date().toISOString().slice(0, 10).replace(/-/g, '.');
+        core.info(`[GitVersion] not available — using date fallback: ${date}-${shaTag}`);
+        return `${date}-${shaTag}`;
+    }
+    /**
+     * Installs GitVersion if not present and runs it to get the semver.
+     * Returns null if installation or execution fails.
+     */
+    static async tryGitVersion() {
+        try {
+            // Install dotnet-gitversion if not available
+            const installed = await this.ensureGitVersion();
+            if (!installed)
+                return null;
+            let output = '';
+            const code = await exec.exec('dotnet-gitversion', ['/showvariable', 'MajorMinorPatch'], {
+                ignoreReturnCode: true,
+                silent: true,
+                listeners: { stdout: (d) => { output += d.toString(); } },
+            });
+            if (code !== 0 || !output.trim())
+                return null;
+            const semver = output.trim();
+            // Basic semver validation
+            if (!/^\d+\.\d+\.\d+$/.test(semver))
+                return null;
+            return semver;
+        }
+        catch {
+            return null;
+        }
+    }
+    static async ensureGitVersion() {
+        // Check if already installed
+        const check = await exec.exec('dotnet-gitversion', ['--version'], {
+            ignoreReturnCode: true, silent: true,
+        });
+        if (check === 0)
+            return true;
+        // Install via dotnet tool
+        core.info('[GitVersion] installing...');
+        const installCode = await exec.exec('dotnet', [
+            'tool', 'install', '--global', 'GitVersion.Tool',
+            '--version', '6.*',
+        ], { ignoreReturnCode: true, silent: true });
+        if (installCode !== 0) {
+            core.info('[GitVersion] install failed — using fallback versioning');
+            return false;
+        }
+        // Add dotnet tools to PATH
+        const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+        process.env.PATH = `${process.env.PATH}:${home}/.dotnet/tools`;
+        return true;
+    }
+}
+exports.GitVersionResolver = GitVersionResolver;
+//# sourceMappingURL=GitVersionResolver.js.map
 
 /***/ }),
 
@@ -141430,6 +141595,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -151756,6 +151939,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -154971,132 +155280,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155167,24 +155350,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
