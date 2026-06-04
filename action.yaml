@@ -10,7 +10,6 @@ tools:
   node: "24"
 
 stages:
-  - name: compile
   - name: unit_test
   - name: linter
   - name: release
