@@ -2286,6 +2286,8 @@ const PlanSummary_1 = __nccwpck_require__(60566);
 const ApplySummary_1 = __nccwpck_require__(48763);
 const TerragruntStateSummary_1 = __nccwpck_require__(40792);
 const AccountValidator_1 = __nccwpck_require__(60616);
+const SopsLoader_1 = __nccwpck_require__(57987);
+const BranchDetector_1 = __nccwpck_require__(90609);
 function containsSubcommand(cmd, sub) {
     return cmd.trim().split(/\s+/).includes(sub);
 }
@@ -2364,6 +2366,8 @@ class DeployStage extends AbstractDeployStage_1.AbstractDeployStage {
             core.exportVariable('TF_INPUT', 'false');
             core.exportVariable('TERRAGRUNT_NON_INTERACTIVE', 'true');
             core.exportVariable('TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE', 'true');
+            // Inject SOPS secrets as TF_VAR_* — masked in logs via core.setSecret()
+            await SopsLoader_1.SopsLoader.loadAndInject(BranchDetector_1.BranchUtils.currentEnv());
         }
         if (!stage.deploy) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_DEPLOY_ENV, `Stage '${stage.name}' requires deploy config`);
@@ -2776,6 +2780,8 @@ const StageTransfer_1 = __nccwpck_require__(24734);
 const PlanSummary_1 = __nccwpck_require__(60566);
 const PlanSecurity_1 = __nccwpck_require__(87142);
 const TerraformStateCollector_1 = __nccwpck_require__(18159);
+const SopsLoader_1 = __nccwpck_require__(57987);
+const BranchDetector_1 = __nccwpck_require__(90609);
 // Subcommands that are never allowed inside a plan stage.
 const FORBIDDEN_SUBCOMMANDS = ['apply', 'destroy', 'force-unlock'];
 function containsSubcommand(cmd, sub) {
@@ -2801,6 +2807,10 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
         // Prevents "cached package does not match lock file" errors when modules
         // were initialized on a different platform (e.g. Windows dev → Linux CI).
         core.exportVariable('TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE', 'true');
+        // Inject SOPS secrets as TF_VAR_* env vars — only if secret files exist in repo root.
+        // Values are masked via core.setSecret() → appear as *** in all subsequent log output.
+        const env = BranchDetector_1.BranchUtils.currentEnv(); // dev | staging | prod
+        await SopsLoader_1.SopsLoader.loadAndInject(env);
         const commands = stage.commands ?? [];
         if (commands.length === 0) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Plan stage '${stage.name}' requires at least one command`);
@@ -3083,6 +3093,7 @@ const exec = __importStar(__nccwpck_require__(95236));
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const FileUtil_1 = __nccwpck_require__(10093);
 const Logger_1 = __nccwpck_require__(26747);
+const SopsLoader_1 = __nccwpck_require__(57987);
 class SetupTerragruntStage {
     static async run() {
         const { terragrunt: version } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
@@ -3092,6 +3103,8 @@ class SetupTerragruntStage {
         await exec.exec('curl', ['-s', '-L', '-o', dest, url]);
         FileUtil_1.FileUtil.chmod(dest, 0o755);
         Logger_1.Logger.info(`Terragrunt ${version} installed at ${dest}`);
+        // Install SOPS for secret file decryption (used by SopsLoader in plan/deploy stages)
+        await SopsLoader_1.SopsLoader.install();
     }
 }
 exports.SetupTerragruntStage = SetupTerragruntStage;
@@ -4287,6 +4300,22 @@ class BranchUtils {
     /** True when running in a pull-request context (review gate, no deploy). */
     static isPR(bt) {
         return bt === BranchType_1.BranchType.PULL_REQUEST;
+    }
+    /**
+     * Maps the current branch to a Terraform environment name.
+     * Used by SopsLoader to load environment-specific secret files.
+     *   develop      → dev
+     *   release/*    → staging
+     *   master/main  → prod
+     *   other        → dev (safe fallback)
+     */
+    static currentEnv() {
+        const bt = BranchUtils.detect();
+        switch (bt) {
+            case BranchType_1.BranchType.MASTER: return 'prod';
+            case BranchType_1.BranchType.RELEASE: return 'staging';
+            default: return 'dev';
+        }
     }
 }
 exports.BranchUtils = BranchUtils;
@@ -5965,6 +5994,198 @@ class SecurityConfigLoader {
 }
 exports.SecurityConfigLoader = SecurityConfigLoader;
 //# sourceMappingURL=SecurityConfigLoader.js.map
+
+/***/ }),
+
+/***/ 57987:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SopsLoader = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const exec = __importStar(__nccwpck_require__(95236));
+const fs = __importStar(__nccwpck_require__(79896));
+const path = __importStar(__nccwpck_require__(16928));
+const Logger_1 = __nccwpck_require__(26747);
+/**
+ * SopsLoader — decrypts SOPS-encrypted secret files and injects them
+ * as TF_VAR_* environment variables. Values are masked in GitHub Actions
+ * logs via core.setSecret() so they appear as *** if accidentally printed.
+ *
+ * Only runs for type: terraform pipelines.
+ *
+ * File naming convention (same as Groovy pipeline-library):
+ *   secrets.yaml                 → common (all environments)
+ *   *.default.secrets.yaml       → default secrets
+ *   *.{env}.secrets.yaml         → environment-specific (dev / staging / prod)
+ *
+ * Requirements:
+ *   - SOPS binary installed on the runner
+ *   - SOPS_AGE_KEY env var set (GitHub Secret) for age decryption
+ */
+class SopsLoader {
+    /**
+     * Find, decrypt and inject all secret files for the given environment.
+     * @param env  The current environment name: dev | staging | prod
+     */
+    static async loadAndInject(env) {
+        const files = this.findSecretFiles(env);
+        if (files.length === 0) {
+            Logger_1.Logger.info('No SOPS secret files found — skipping secret injection');
+            return;
+        }
+        Logger_1.Logger.info(`Found ${files.length} secret file(s): ${files.join(', ')}`);
+        const secrets = {};
+        for (const file of files) {
+            Logger_1.Logger.info(`Decrypting ${file}...`);
+            const decrypted = await this.decrypt(file);
+            const parsed = this.parseEnvFormat(decrypted);
+            const count = Object.keys(parsed).length;
+            Logger_1.Logger.info(`Loaded ${count} secret(s) from ${file}`);
+            Object.assign(secrets, parsed);
+        }
+        if (Object.keys(secrets).length === 0) {
+            Logger_1.Logger.info('No secrets found in files — skipping injection');
+            return;
+        }
+        // Inject as TF_VAR_* and mask each value
+        for (const [key, value] of Object.entries(secrets)) {
+            const envKey = `TF_VAR_${key}`;
+            core.exportVariable(envKey, value); // available to all subsequent steps
+            core.setSecret(value); // GitHub masks this value in all logs → ***
+        }
+        Logger_1.Logger.info(`Injected ${Object.keys(secrets).length} secret(s) as TF_VAR_* env vars`);
+        // Log key names only (never values)
+        core.info(`Secret keys injected: ${Object.keys(secrets).map(k => `TF_VAR_${k}`).join(', ')}`);
+    }
+    /**
+     * Locate secret files matching the naming convention.
+     * Search is done in the current working directory (repo root).
+     */
+    static findSecretFiles(env) {
+        const cwd = process.cwd();
+        const candidates = [
+            'secrets.yaml', // common — all environments
+            'secrets.yml',
+            ...this.glob(cwd, /^.+\.default\.secrets\.ya?ml$/), // *.default.secrets.yaml
+            ...this.glob(cwd, new RegExp(`^.+\\.${env}\\.secrets\\.ya?ml$`)), // *.{env}.secrets.yaml
+        ];
+        // Deduplicate and keep only existing files
+        return [...new Set(candidates)].filter(f => fs.existsSync(path.join(cwd, f)));
+    }
+    /**
+     * List files in cwd matching the given regex pattern.
+     */
+    static glob(dir, pattern) {
+        try {
+            return fs.readdirSync(dir).filter(f => pattern.test(f));
+        }
+        catch {
+            return [];
+        }
+    }
+    /**
+     * Decrypt a SOPS file and return the plaintext string.
+     * Uses SOPS_AGE_KEY env var automatically if set.
+     */
+    static async decrypt(file) {
+        let output = '';
+        let stderr = '';
+        const exitCode = await exec.exec('sops', ['--decrypt', file], {
+            listeners: {
+                stdout: (data) => { output += data.toString(); },
+                stderr: (data) => { stderr += data.toString(); },
+            },
+            silent: true, // do not echo decrypted values to logs
+            ignoreReturnCode: true,
+        });
+        if (exitCode !== 0) {
+            // Log stderr without exposing decrypted content
+            throw new Error(`SOPS decryption failed for ${file} (exit ${exitCode}): ${stderr.trim()}`);
+        }
+        return output;
+    }
+    /**
+     * Parse KEY=VALUE format (env-style) or YAML key: value format.
+     * Supports both formats so secrets files can be either .env or .yaml.
+     */
+    static parseEnvFormat(content) {
+        const result = {};
+        for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            // Skip empty lines and comments
+            if (!trimmed || trimmed.startsWith('#'))
+                continue;
+            // KEY=VALUE format (.env style)
+            const eqMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+            if (eqMatch) {
+                result[eqMatch[1]] = eqMatch[2].replace(/^["']|["']$/g, ''); // strip quotes
+                continue;
+            }
+            // key: value format (YAML style — simple scalar only)
+            const yamlMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(.+)$/);
+            if (yamlMatch) {
+                result[yamlMatch[1]] = yamlMatch[2].replace(/^["']|["']$/g, ''); // strip quotes
+            }
+        }
+        return result;
+    }
+    /**
+     * Install SOPS binary on the runner if not already present.
+     * Called from SetupTerragruntStage.
+     */
+    static async install() {
+        const check = await exec.exec('which', ['sops'], { ignoreReturnCode: true, silent: true });
+        if (check === 0) {
+            Logger_1.Logger.info('SOPS already installed');
+            return;
+        }
+        const version = '3.9.4';
+        const dest = '/usr/local/bin/sops';
+        const url = `https://github.com/getsops/sops/releases/download/v${version}/sops-v${version}.linux.amd64`;
+        Logger_1.Logger.info(`Installing SOPS ${version}...`);
+        await exec.exec('curl', ['-s', '-L', '-o', dest, url]);
+        await exec.exec('chmod', ['+x', dest]);
+        Logger_1.Logger.info(`SOPS ${version} installed at ${dest}`);
+    }
+}
+exports.SopsLoader = SopsLoader;
+//# sourceMappingURL=SopsLoader.js.map
 
 /***/ }),
 
