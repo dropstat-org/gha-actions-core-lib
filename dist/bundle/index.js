@@ -5196,7 +5196,7 @@ class PlanExtractor {
         // so the resulting file is clean JSONL (one plan JSON object per line).
         const showCmd = runAll
             ? `terragrunt${globalPrefix} run --all --queue-ignore-errors show -- -json ${binary} 2>/dev/null | grep '^{' > ${json}`
-            : `terragrunt show -- -json ${binary} 2>/dev/null | grep '^{' > ${json}`;
+            : `terragrunt${globalPrefix} show -- -json ${binary} 2>/dev/null | grep '^{' > ${json}`;
         return [planCmd, showCmd];
     }
     /**
