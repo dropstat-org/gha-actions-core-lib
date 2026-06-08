@@ -29,11 +29,6 @@ on:
         type: string
         required: false
         default: ""
-
-# PIPELINE_REF makes branch detection use the real deploy branch instead of
-# GITHUB_REF (which points at the default branch under workflow_run).
-env:
-  PIPELINE_REF: ${{ inputs.deploy_ref }}
   workflow_dispatch:
     inputs:
       sha_tag:
@@ -47,12 +42,17 @@ env:
         options: [dev, qa]    # prod only via master/main
         default: dev
 
+# PIPELINE_REF makes branch detection use the real deploy branch instead of
+# GITHUB_REF (which points at the default branch under workflow_run). Set per job
+# (workflow-level env cannot reference the inputs context in a reusable workflow).
+
 jobs:
   config:
     name: Config
     runs-on: ubuntu-latest
     env:
       PIPELINE_PHASE: cd
+      PIPELINE_REF: ${{ inputs.deploy_ref }}
       BRANCHING_STRATEGY: ${{ inputs.branching_strategy }}
     outputs:
       plan_enabled:        ${{ steps.cfg.outputs.plan_enabled }}
@@ -149,6 +149,7 @@ jobs:
         with:
           stage: release
         env:
+          PIPELINE_REF: ${{ inputs.deploy_ref }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA_TAG: ${{ inputs.sha_tag }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
@@ -186,6 +187,7 @@ jobs:
         with:
           stage: deploy
         env:
+          PIPELINE_REF: ${{ inputs.deploy_ref }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
@@ -217,6 +219,7 @@ jobs:
         with:
           stage: ecs_deploy
         env:
+          PIPELINE_REF: ${{ inputs.deploy_ref }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
