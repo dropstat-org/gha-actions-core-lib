@@ -68,6 +68,8 @@ jobs:
       ActionsCoreLib_type: ${{ steps.cfg.outputs.ActionsCoreLib_type }}
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
       - id: cfg
         uses: dropstat-org/gha-actions-core-lib@main
         with:
@@ -85,6 +87,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
@@ -105,6 +109,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: checkov_tf
@@ -119,6 +125,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: pre_deploy
@@ -165,6 +173,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
       - name: Setup AWS credentials
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
@@ -205,6 +215,8 @@ jobs:
       actions: read   # app deploys (static frontends) descargan el artifact dist via 'gh run download'
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
       # Always assume AWS_ROLE_ARN: terraform deploys AND app deploys (e.g. static
       # frontends doing `aws s3 sync` + CloudFront invalidation) both need creds.
       # setup-terraform also installs TF/TG (harmless for app deploys).
@@ -241,6 +253,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
       - name: Setup AWS credentials
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
@@ -271,6 +285,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: post_deploy
