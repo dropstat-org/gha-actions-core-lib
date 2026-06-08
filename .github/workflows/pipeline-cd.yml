@@ -20,10 +20,20 @@ on:
         type: string
         required: false
         default: ""
+      deploy_ref:
+        description: "Branch being deployed (e.g. feature/x, develop). Required when triggered by workflow_run/dispatch so env routing is correct. Empty = GITHUB_REF."
+        type: string
+        required: false
+        default: ""
       branching_strategy:
         type: string
         required: false
         default: ""
+
+# PIPELINE_REF makes branch detection use the real deploy branch instead of
+# GITHUB_REF (which points at the default branch under workflow_run).
+env:
+  PIPELINE_REF: ${{ inputs.deploy_ref }}
   workflow_dispatch:
     inputs:
       sha_tag:
