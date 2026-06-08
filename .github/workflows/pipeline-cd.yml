@@ -123,6 +123,34 @@ jobs:
         with:
           stage: pre_deploy
 
+  # ── Review gate: TODO apply terraform requiere aprobacion manual (cualquier env) ──
+  # required-reviewers en environments no esta disponible en el plan (repos privados),
+  # asi que el gate se hace in-workflow. Solo type=terraform; los apps no se gatean.
+  # El caller debe conceder issues:write (un reusable no puede exceder permisos del caller).
+  # Aprobadores: variable CD_APPROVERS (org/repo).
+  approval:
+    name: Approval
+    needs: [config, plan, pre_deploy]
+    if: |
+      always() &&
+      needs.config.outputs.deploy_enabled == 'true' &&
+      needs.config.outputs.ActionsCoreLib_type == 'terraform' &&
+      needs.plan.result != 'failure' &&
+      needs.pre_deploy.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Manual approval gate
+        uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
+        with:
+          secret: ${{ github.token }}
+          approvers: ${{ vars.CD_APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "Aprobar deploy terraform: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          issue-body: "Revisa el plan del CI antes de aprobar. Comenta approved para aplicar o denied para cancelar."
+          exclude-workflow-initiator-as-approver: false
+
   # ── App CD: promote sha → env tag in ECR ─────────────────────────────────────
 
   release:
@@ -160,14 +188,15 @@ jobs:
 
   deploy:
     name: Deploy
-    needs: [config, plan, pre_deploy]
+    needs: [config, plan, pre_deploy, approval]
     environment: ${{ needs.config.outputs.deploy_environment }}
     timeout-minutes: 60
     if: |
       always() &&
       needs.config.outputs.deploy_enabled == 'true' &&
       needs.pre_deploy.result != 'failure' &&
-      (needs.plan.result == 'success' || needs.plan.result == 'skipped')
+      (needs.plan.result == 'success' || needs.plan.result == 'skipped') &&
+      (needs.approval.result == 'success' || needs.approval.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       id-token: write
