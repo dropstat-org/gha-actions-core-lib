@@ -5029,10 +5029,14 @@ class OutputWriter {
         // ── Optional pipeline-phase filter (CI / CD split in a single repo) ─────────
         // Additive on top of branch gating. When PIPELINE_PHASE is unset the behaviour
         // is identical to before (full single-workflow pipeline).
-        //   ci → drop pure-deploy stages (the build/validate half)
-        //   cd → keep only pre-deploy validation + deploy stages (the promote/deploy half)
-        // The intersection with branch slots still applies, so e.g. a CD run on a
-        // feature branch resolves to an empty deploy set (cannot deploy from feature).
+        //   ci → drop pure-deploy stages (the build/validate half). Branch slots still
+        //        apply, so feature builds + publishes, develop/release/master do not.
+        //   cd → enable the declared deploy/promote stages. Single image build model:
+        //        the image is built once (feature CI) and promoted through ECR tags.
+        //        Deploy target env is derived from the branch (see branchEnv below):
+        //          feature/hotfix → dev   develop → dev
+        //          release/*      → qa    master/main → prod
+        //        Pull requests never deploy (review gate only).
         const phase = (process.env.PIPELINE_PHASE ?? '').toLowerCase();
         if (phase === 'ci') {
             const CI_DENY = new Set([
@@ -5048,7 +5052,17 @@ class OutputWriter {
                 StageName_1.StageName.PRE_DEPLOY, StageName_1.StageName.DEPLOY, StageName_1.StageName.POST_DEPLOY,
                 StageName_1.StageName.RELEASE, StageName_1.StageName.ECS_DEPLOY,
             ]);
-            allowedSlots = new Set([...allowedSlots].filter(s => CD_ALLOW.has(s)));
+            if (branchType === BranchType_1.BranchType.PULL_REQUEST) {
+                // PRs are a review gate — never deploy. Keep only branch-allowed checks.
+                allowedSlots = new Set([...allowedSlots].filter(s => CD_ALLOW.has(s)));
+            }
+            else {
+                // Deployable branches (feature/hotfix/develop/release/master): enable every
+                // declared CD stage regardless of the gitflow build/promote split, so a
+                // feature branch can auto-deploy to dev. The prod guard in ECSDeployStage
+                // still blocks env=prod from any branch other than master/main.
+                allowedSlots = new Set(CD_ALLOW);
+            }
         }
         if (phase)
             core.info(`Pipeline phase: ${phase} → stages: ${[...allowedSlots].join(', ') || '(none)'}`);
@@ -5078,6 +5092,9 @@ class OutputWriter {
         // (develop→dev, release/*→qa, master/main→prod). Outside CD, keep the static
         // action.yaml value so legacy single-workflow repos are unaffected.
         const branchEnv = {
+            [BranchType_1.BranchType.FEATURE]: 'dev',
+            [BranchType_1.BranchType.HOTFIX]: 'dev',
+            [BranchType_1.BranchType.HOTFIX_EMERGENCY]: 'dev',
             [BranchType_1.BranchType.DEVELOP]: 'dev',
             [BranchType_1.BranchType.RELEASE]: 'qa',
             [BranchType_1.BranchType.MASTER]: 'prod',
