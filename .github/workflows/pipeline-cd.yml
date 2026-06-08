@@ -173,6 +173,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
+      actions: read   # app deploys (static frontends) descargan el artifact dist via 'gh run download'
     steps:
       - uses: actions/checkout@v4.2.2
       # Always assume AWS_ROLE_ARN: terraform deploys AND app deploys (e.g. static
