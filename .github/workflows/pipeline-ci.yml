@@ -21,6 +21,7 @@ jobs:
   config:
     name: Config
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       PIPELINE_PHASE: ci
       BRANCHING_STRATEGY: ${{ inputs.branching_strategy }}
@@ -56,6 +57,7 @@ jobs:
     needs: config
     if: needs.config.outputs.compile_enabled == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
       - name: Setup Java
@@ -81,6 +83,7 @@ jobs:
       needs.config.outputs.unit_test_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -95,6 +98,7 @@ jobs:
       needs.config.outputs.linter_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -109,6 +113,7 @@ jobs:
       needs.config.outputs.semgrep_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       security-events: write
@@ -128,6 +133,7 @@ jobs:
       needs.config.outputs.sonarqube_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -145,6 +151,7 @@ jobs:
       needs.config.outputs.trivy_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       security-events: write
@@ -159,6 +166,7 @@ jobs:
     needs: config
     if: needs.config.outputs.checkov_enabled == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -177,6 +185,7 @@ jobs:
       needs.semgrep.result != 'failure' &&
       needs.trivy.result != 'failure'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write
@@ -206,6 +215,7 @@ jobs:
     needs: config
     if: needs.config.outputs.generic_enabled == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -219,6 +229,7 @@ jobs:
     needs: config
     if: needs.config.outputs.plan_enabled == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       id-token: write
       contents: read
@@ -242,6 +253,7 @@ jobs:
       needs.config.outputs.checkov_tf_enabled == 'true' &&
       needs.plan.result != 'failure'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main

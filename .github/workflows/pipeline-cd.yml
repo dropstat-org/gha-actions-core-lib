@@ -50,6 +50,7 @@ jobs:
   config:
     name: Config
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       PIPELINE_PHASE: cd
       PIPELINE_REF: ${{ inputs.deploy_ref }}
@@ -82,6 +83,7 @@ jobs:
     needs: config
     if: needs.config.outputs.plan_enabled == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       id-token: write
       contents: read
@@ -107,6 +109,7 @@ jobs:
       needs.config.outputs.checkov_tf_enabled == 'true' &&
       needs.plan.result != 'failure'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
         with:
@@ -123,6 +126,7 @@ jobs:
       needs.config.outputs.pre_deploy_enabled == 'true' &&
       needs.plan.result != 'failure'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
         with:
@@ -166,6 +170,7 @@ jobs:
     needs: [config]
     if: needs.config.outputs.release_enabled == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Environment gate — approval (qa/prod) + scoped credentials. dev = auto.
     environment: ${{ needs.config.outputs.deploy_environment }}
     permissions:
@@ -200,7 +205,7 @@ jobs:
     name: Deploy
     needs: [config, plan, pre_deploy, approval]
     environment: ${{ needs.config.outputs.deploy_environment }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     if: |
       always() &&
       needs.config.outputs.deploy_enabled == 'true' &&
@@ -247,6 +252,7 @@ jobs:
       needs.config.outputs.ecs_deploy_enabled == 'true' &&
       needs.release.result != 'failure'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: ${{ needs.config.outputs.deploy_environment }}
     permissions:
       id-token: write
@@ -283,6 +289,7 @@ jobs:
       needs.deploy.result != 'failure' &&
       needs.ecs_deploy.result != 'failure'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
         with:
