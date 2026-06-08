@@ -1,0 +1,229 @@
+name: Pipeline CD
+
+# Reusable CD half of the pipeline.
+#   app       → release (promote sha → env tag) + ecs_deploy
+#   terraform → plan + checkov_tf + deploy (+ release tag on master)
+#
+# The library's config stage runs with PIPELINE_PHASE=cd, which intersects the
+# branch-allowed stages with the CD set and derives deploy_environment from the
+# branch (develop→dev, release/*→qa, master/main→prod). The GitHub `environment:`
+# gate provides the approval step + scoped ECS_DEPLOY_ROLE secret per environment.
+#
+# Image promotion rules (unchanged, enforced by AppRelease / ECSDeployStage):
+#   develop→:dev  release/*→:qa  master/main→:prod (prod only from master/main).
+
+on:
+  workflow_call:
+    inputs:
+      sha_tag:
+        description: "Image sha tag to promote/deploy (e.g. sha-abc1234). Empty = commit sha / env name."
+        type: string
+        required: false
+        default: ""
+      branching_strategy:
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+    inputs:
+      sha_tag:
+        description: "Image tag to deploy (e.g. sha-cdb6761)"
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [dev, qa]    # prod only via master/main
+        default: dev
+
+jobs:
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    env:
+      PIPELINE_PHASE: cd
+      BRANCHING_STRATEGY: ${{ inputs.branching_strategy }}
+    outputs:
+      plan_enabled:        ${{ steps.cfg.outputs.plan_enabled }}
+      checkov_tf_enabled:  ${{ steps.cfg.outputs.checkov_tf_enabled }}
+      pre_deploy_enabled:  ${{ steps.cfg.outputs.pre_deploy_enabled }}
+      deploy_enabled:      ${{ steps.cfg.outputs.deploy_enabled }}
+      post_deploy_enabled: ${{ steps.cfg.outputs.post_deploy_enabled }}
+      release_enabled:     ${{ steps.cfg.outputs.release_enabled }}
+      ecs_deploy_enabled:  ${{ steps.cfg.outputs.ecs_deploy_enabled }}
+      deploy_environment:  ${{ steps.cfg.outputs.deploy_environment }}
+      tools_terraform:     ${{ steps.cfg.outputs.tools_terraform }}
+      tools_terragrunt:    ${{ steps.cfg.outputs.tools_terragrunt }}
+      ActionsCoreLib_type: ${{ steps.cfg.outputs.ActionsCoreLib_type }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - id: cfg
+        uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: config
+
+  # ── Terraform CD: plan (artifact) + security gate before deploy ──────────────
+
+  plan:
+    name: Plan
+    needs: config
+    if: needs.config.outputs.plan_enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-plan
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: plan
+
+  checkov_tf:
+    name: Checkov Terraform
+    needs: [config, plan]
+    if: |
+      always() &&
+      needs.config.outputs.checkov_tf_enabled == 'true' &&
+      needs.plan.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: checkov_tf
+
+  pre_deploy:
+    name: Pre Deploy
+    needs: [config, plan]
+    if: |
+      always() &&
+      needs.config.outputs.pre_deploy_enabled == 'true' &&
+      needs.plan.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: pre_deploy
+
+  # ── App CD: promote sha → env tag in ECR ─────────────────────────────────────
+
+  release:
+    name: Release
+    needs: [config]
+    if: needs.config.outputs.release_enabled == 'true'
+    runs-on: ubuntu-latest
+    # Environment gate — approval (qa/prod) + scoped credentials. dev = auto.
+    environment: ${{ needs.config.outputs.deploy_environment }}
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Setup AWS credentials
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-release
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA_TAG: ${{ inputs.sha_tag }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
+
+  # ── Deploy (terraform apply OR app ecs_deploy) ───────────────────────────────
+
+  deploy:
+    name: Deploy
+    needs: [config, plan, pre_deploy]
+    environment: ${{ needs.config.outputs.deploy_environment }}
+    timeout-minutes: 60
+    if: |
+      always() &&
+      needs.config.outputs.deploy_enabled == 'true' &&
+      needs.pre_deploy.result != 'failure' &&
+      (needs.plan.result == 'success' || needs.plan.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Setup Terraform + AWS
+        if: needs.config.outputs.plan_enabled == 'true'
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-deploy
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: deploy
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+
+  ecs_deploy:
+    name: ECS Deploy
+    needs: [config, release]
+    if: |
+      always() &&
+      needs.config.outputs.ecs_deploy_enabled == 'true' &&
+      needs.release.result != 'failure'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.config.outputs.deploy_environment }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Setup AWS credentials
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-ecs-deploy
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: ecs_deploy
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
+          ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
+          SHA_TAG: ${{ inputs.sha_tag }}
+
+  post_deploy:
+    name: Post Deploy
+    needs: [config, deploy, ecs_deploy]
+    if: |
+      always() &&
+      needs.config.outputs.post_deploy_enabled == 'true' &&
+      needs.deploy.result != 'failure' &&
+      needs.ecs_deploy.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: post_deploy
