@@ -159,6 +159,7 @@ jobs:
           secret: ${{ github.token }}
           approvers: ${{ vars.CD_APPROVERS }}
           minimum-approvals: 1
+          timeout-minutes: 5
           issue-title: "Aprobar deploy terraform: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
           issue-body: "Revisa el plan del CI antes de aprobar. Comenta approved para aplicar o denied para cancelar."
           exclude-workflow-initiator-as-approver: false
