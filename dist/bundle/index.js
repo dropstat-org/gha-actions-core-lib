@@ -1601,6 +1601,12 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     async install(version) {
         core.info(`Installing Semgrep ${version}...`);
         await exec.exec('pip', ['install', `semgrep==${version}`, '--quiet']);
+        // pip --user installs to ~/.local/bin which may not be in PATH on self-hosted runners.
+        // Add it explicitly so the semgrep binary is findable in this step.
+        const localBin = `${process.env.HOME}/.local/bin`;
+        if (!process.env.PATH?.includes(localBin)) {
+            process.env.PATH = `${process.env.PATH}:${localBin}`;
+        }
     }
     async run(stage) {
         const end = this.startGroup(`semgrep: ${stage.name}`);
