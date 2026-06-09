@@ -33,7 +33,7 @@ on:
         description: "Runner label(s) — defaults to ubuntu-latest. Pass a JSON array string for self-hosted (e.g. '[\"self-hosted\",\"aws\",\"dropstat\"]')."
         type: string
         required: false
-        default: '["self-hosted","aws","dropstat"]'
+        default: '["ubuntu-latest"]'
   workflow_dispatch:
     inputs:
       sha_tag:
