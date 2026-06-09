@@ -37,7 +37,7 @@ runs:
     - name: Install Terragrunt
       uses: dropstat-org/gha-actions-core-lib@main
       with:
-        stage: setup_terragrunt
+        stage: setup-terragrunt
 
     - name: Configure Terraform plugin cache
       shell: bash
