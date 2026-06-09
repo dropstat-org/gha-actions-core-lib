@@ -38,6 +38,10 @@ runs:
       shell: bash
       run: |
         TG_VERSION="${{ inputs.terragrunt-version }}"
+        # Remove any pre-existing binary first — on self-hosted AMIs the file may be
+        # root-owned, so curl cannot overwrite it directly. Deleting and recreating
+        # works because /usr/local/bin is world-writable on our custom runner image.
+        rm -f /usr/local/bin/terragrunt || true
         curl -sSfL \
           "https://github.com/gruntwork-io/terragrunt/releases/download/v${TG_VERSION}/terragrunt_linux_amd64" \
           -o /usr/local/bin/terragrunt
