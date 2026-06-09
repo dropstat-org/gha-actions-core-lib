@@ -169,45 +169,7 @@ jobs:
           issue-body: "Revisa el plan del CI antes de aprobar. Comenta approved para aplicar o denied para cancelar."
           exclude-workflow-initiator-as-approver: false
 
-  # ── App CD: promote sha → env tag in ECR ─────────────────────────────────────
-
-  release:
-    name: Release
-    needs: [config]
-    if: needs.config.outputs.release_enabled == 'true'
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 10
-    # Environment gate — approval (qa/prod) + scoped credentials. dev = auto.
-    environment: ${{ needs.config.outputs.deploy_environment }}
-    permissions:
-      id-token: write
-      contents: write
-    steps:
-      - uses: actions/checkout@v4.2.2
-        with:
-          ref: ${{ inputs.deploy_ref }}
-      - name: Setup AWS credentials
-        # Terraform release only creates a git tag — no ECR/AWS needed.
-        if: needs.config.outputs.ActionsCoreLib_type != 'terraform'
-        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
-        with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          session-name: GitHubActions-cd-release
-          terraform-version: ${{ needs.config.outputs.tools_terraform }}
-          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
-        with:
-          stage: release
-        env:
-          PIPELINE_REF: ${{ inputs.deploy_ref }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA_TAG: ${{ inputs.sha_tag }}
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
-          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
-
-  # ── Deploy (terraform apply OR app ecs_deploy) ───────────────────────────────
+  # ── Deploy (terraform apply) ─────────────────────────────────────────────────
 
   deploy:
     name: Deploy
@@ -252,13 +214,12 @@ jobs:
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
 
+  # ── ECS Deploy ────────────────────────────────────────────────────────────────
+
   ecs_deploy:
     name: ECS Deploy
-    needs: [config, release]
-    if: |
-      always() &&
-      needs.config.outputs.ecs_deploy_enabled == 'true' &&
-      needs.release.result != 'failure'
+    needs: [config]
+    if: needs.config.outputs.ecs_deploy_enabled == 'true'
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 30
     environment: ${{ needs.config.outputs.deploy_environment }}
@@ -288,9 +249,54 @@ jobs:
           ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
           SHA_TAG: ${{ inputs.sha_tag }}
 
+  # ── Release: git tag (terraform) or ECR promotion (app) ──────────────────────
+  # Runs AFTER a successful deploy/ecs_deploy so the release tag reflects what
+  # was actually applied/deployed, not just what was planned.
+  #   terraform → git tag created after apply succeeds
+  #   app       → sha promoted to :dev/:qa/:prod in ECR after ECS deploy succeeds
+
+  release:
+    name: Release
+    needs: [config, deploy, ecs_deploy]
+    if: |
+      always() &&
+      needs.config.outputs.release_enabled == 'true' &&
+      (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
+      (needs.ecs_deploy.result == 'success' || needs.ecs_deploy.result == 'skipped') &&
+      (needs.deploy.result == 'success' || needs.ecs_deploy.result == 'success')
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
+      - name: Setup AWS credentials
+        # Terraform release only creates a git tag — no ECR/AWS needed.
+        if: needs.config.outputs.ActionsCoreLib_type != 'terraform'
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-release
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: release
+        env:
+          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA_TAG: ${{ inputs.sha_tag }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
+
   post_deploy:
     name: Post Deploy
-    needs: [config, deploy, ecs_deploy]
+    needs: [config, deploy, ecs_deploy, release]
     if: |
       always() &&
       needs.config.outputs.post_deploy_enabled == 'true' &&
