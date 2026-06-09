@@ -3112,6 +3112,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SetupTerragruntStage = void 0;
 const exec = __importStar(__nccwpck_require__(95236));
+const fs = __importStar(__nccwpck_require__(79896));
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const FileUtil_1 = __nccwpck_require__(10093);
 const Logger_1 = __nccwpck_require__(26747);
@@ -3121,10 +3122,22 @@ class SetupTerragruntStage {
         const { terragrunt: version } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
         const dest = '/usr/local/bin/terragrunt';
         const url = `https://github.com/gruntwork-io/terragrunt/releases/download/v${version}/terragrunt_linux_amd64`;
-        Logger_1.Logger.info(`Installing Terragrunt ${version}...`);
-        await exec.exec('curl', ['-s', '-L', '-o', dest, url]);
-        FileUtil_1.FileUtil.chmod(dest, 0o755);
-        Logger_1.Logger.info(`Terragrunt ${version} installed at ${dest}`);
+        // Skip download if the correct version is already installed (e.g. pre-baked in AMI).
+        const existing = await exec.getExecOutput(dest, ['--version'], { ignoreReturnCode: true, silent: true });
+        if (existing.exitCode === 0 && existing.stdout.includes(version)) {
+            Logger_1.Logger.info(`Terragrunt ${version} already installed — skipping download`);
+        }
+        else {
+            // Remove any pre-existing binary first — on self-hosted AMIs the file may be
+            // root-owned, so curl cannot overwrite it directly. Deleting and recreating
+            // works because /usr/local/bin is world-writable on our custom runner image.
+            if (fs.existsSync(dest))
+                fs.unlinkSync(dest);
+            Logger_1.Logger.info(`Installing Terragrunt ${version}...`);
+            await exec.exec('curl', ['-s', '-L', '-o', dest, url]);
+            FileUtil_1.FileUtil.chmod(dest, 0o755);
+            Logger_1.Logger.info(`Terragrunt ${version} installed at ${dest}`);
+        }
         // Install SOPS for secret file decryption (used by SopsLoader in plan/deploy stages)
         await SopsLoader_1.SopsLoader.install();
     }

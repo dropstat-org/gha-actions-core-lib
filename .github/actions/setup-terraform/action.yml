@@ -35,23 +35,9 @@ runs:
         terraform_wrapper: false  # wrapper breaks terragrunt output parsing
 
     - name: Install Terragrunt
-      shell: bash
-      run: |
-        TG_VERSION="${{ inputs.terragrunt-version }}"
-        # Skip download if the correct version is already installed (e.g. pre-baked in AMI).
-        if terragrunt --version 2>/dev/null | grep -q "${TG_VERSION}"; then
-          echo "Terragrunt ${TG_VERSION} already installed — skipping download"
-        else
-          # Remove any pre-existing binary first — on self-hosted AMIs the file may be
-          # root-owned, so curl cannot overwrite it. Deleting and recreating works because
-          # /usr/local/bin is world-writable on our custom runner image.
-          rm -f /usr/local/bin/terragrunt || true
-          curl -sSfL \
-            "https://github.com/gruntwork-io/terragrunt/releases/download/v${TG_VERSION}/terragrunt_linux_amd64" \
-            -o /usr/local/bin/terragrunt
-          chmod +x /usr/local/bin/terragrunt
-        fi
-        terragrunt --version
+      uses: dropstat-org/gha-actions-core-lib@main
+      with:
+        stage: setup_terragrunt
 
     - name: Configure Terraform plugin cache
       shell: bash
