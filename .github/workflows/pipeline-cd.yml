@@ -33,7 +33,7 @@ on:
         description: "Runner label(s) — defaults to ubuntu-latest. Pass a JSON array string for self-hosted (e.g. '[\"self-hosted\",\"aws\",\"dropstat\"]')."
         type: string
         required: false
-        default: "ubuntu-latest"
+        default: '["ubuntu-latest"]'
   workflow_dispatch:
     inputs:
       sha_tag:
@@ -54,7 +54,7 @@ on:
 jobs:
   config:
     name: Config
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 10
     env:
       PIPELINE_PHASE: cd
@@ -87,7 +87,7 @@ jobs:
     name: Plan
     needs: config
     if: needs.config.outputs.plan_enabled == 'true'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 10
     permissions:
       id-token: write
@@ -113,7 +113,7 @@ jobs:
       always() &&
       needs.config.outputs.checkov_tf_enabled == 'true' &&
       needs.plan.result != 'failure'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
@@ -130,7 +130,7 @@ jobs:
       always() &&
       needs.config.outputs.pre_deploy_enabled == 'true' &&
       needs.plan.result != 'failure'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
@@ -154,7 +154,7 @@ jobs:
       needs.config.outputs.ActionsCoreLib_type == 'terraform' &&
       needs.plan.result != 'failure' &&
       needs.pre_deploy.result != 'failure'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       issues: write
     steps:
@@ -175,7 +175,7 @@ jobs:
     name: Release
     needs: [config]
     if: needs.config.outputs.release_enabled == 'true'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 10
     # Environment gate — approval (qa/prod) + scoped credentials. dev = auto.
     environment: ${{ needs.config.outputs.deploy_environment }}
@@ -218,7 +218,7 @@ jobs:
       needs.pre_deploy.result != 'failure' &&
       (needs.plan.result == 'success' || needs.plan.result == 'skipped') &&
       (needs.approval.result == 'success' || needs.approval.result == 'skipped')
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       id-token: write
       contents: read
@@ -257,7 +257,7 @@ jobs:
       always() &&
       needs.config.outputs.ecs_deploy_enabled == 'true' &&
       needs.release.result != 'failure'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 30
     environment: ${{ needs.config.outputs.deploy_environment }}
     permissions:
@@ -294,7 +294,7 @@ jobs:
       needs.config.outputs.post_deploy_enabled == 'true' &&
       needs.deploy.result != 'failure' &&
       needs.ecs_deploy.result != 'failure'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
