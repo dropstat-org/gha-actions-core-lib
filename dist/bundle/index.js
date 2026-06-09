@@ -1602,13 +1602,12 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     async install(version) {
         core.info(`Installing Semgrep ${version}...`);
         await exec.exec('pip', ['install', `semgrep==${version}`, '--quiet']);
-        // pip --user installs to ~/.local/bin which may not be in PATH on self-hosted runners.
-        // Use os.homedir() (reads /etc/passwd) — not process.env.HOME which the runner agent
-        // may override to a temp dir for the action process.
-        const localBin = `${os.homedir()}/.local/bin`;
-        if (!process.env.PATH?.includes(localBin)) {
-            process.env.PATH = `${process.env.PATH}:${localBin}`;
-        }
+        // pip --user installs the semgrep binary to ~/.local/bin which is not in PATH on
+        // self-hosted runners. Symlink it to /usr/local/bin (which our custom AMI makes
+        // writable via chmod o+w) so exec.exec('semgrep', ...) can find it.
+        const semgrepBin = `${os.homedir()}/.local/bin/semgrep`;
+        await exec.exec('ln', ['-sf', semgrepBin, '/usr/local/bin/semgrep']);
+        core.info(`Symlinked ${semgrepBin} → /usr/local/bin/semgrep`);
     }
     async run(stage) {
         const end = this.startGroup(`semgrep: ${stage.name}`);
@@ -1638,10 +1637,7 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
                 '.',
                 ...extraArgs,
             ];
-            // Use `python3 -m semgrep` to bypass PATH resolution — pip may install the
-            // semgrep binary to ~/.local/bin which may not be in the runner's PATH.
-            // python3 is always available at /usr/local/bin/python3 on our custom AMI.
-            const code = await exec.exec('python3', ['-m', 'semgrep', ...tableArgs], { ignoreReturnCode: true });
+            const code = await exec.exec('semgrep', tableArgs, { ignoreReturnCode: true });
             this.handleResult(this.mapResult(code), stage.name, softFail);
             if (UPLOAD_SARIF) {
                 // Scan 2: SARIF output for GitHub Security tab (requires GitHub Advanced Security)
@@ -1653,7 +1649,7 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
                     '.',
                     ...extraArgs,
                 ];
-                await exec.exec('python3', ['-m', 'semgrep', ...sarifArgs], { ignoreReturnCode: true });
+                await exec.exec('semgrep', sarifArgs, { ignoreReturnCode: true });
                 core.info('Uploading SARIF to GitHub Security tab');
                 await (0, SarifUploader_1.uploadSarif)('semgrep-results.sarif');
             }
