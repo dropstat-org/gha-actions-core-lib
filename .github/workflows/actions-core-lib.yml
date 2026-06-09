@@ -14,11 +14,16 @@ on:
         type: string
         required: false
         default: ""
+      runner:
+        description: "Runner label(s) — defaults to ubuntu-latest. Pass a JSON array string for self-hosted (e.g. '[\"self-hosted\",\"dropstat\",\"linux\",\"x64\"]')."
+        type: string
+        required: false
+        default: "ubuntu-latest"
 
 jobs:
   config:
     name: Config
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     outputs:
       compile_enabled:     ${{ steps.ActionsCoreLib.outputs.compile_enabled }}
       unit_test_enabled:   ${{ steps.ActionsCoreLib.outputs.unit_test_enabled }}
@@ -56,7 +61,7 @@ jobs:
     name: Compile
     needs: config
     if: needs.config.outputs.compile_enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - name: Setup Java
@@ -81,7 +86,7 @@ jobs:
       always() &&
       needs.config.outputs.unit_test_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -95,7 +100,7 @@ jobs:
       always() &&
       needs.config.outputs.linter_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -109,7 +114,7 @@ jobs:
       always() &&
       needs.config.outputs.semgrep_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     permissions:
       contents: read
       security-events: write
@@ -128,7 +133,7 @@ jobs:
       always() &&
       needs.config.outputs.sonarqube_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -145,7 +150,7 @@ jobs:
       always() &&
       needs.config.outputs.trivy_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     permissions:
       contents: read
       security-events: write
@@ -159,7 +164,7 @@ jobs:
     name: Checkov
     needs: config
     if: needs.config.outputs.checkov_enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -177,7 +182,7 @@ jobs:
       needs.linter.result != 'failure' &&
       needs.semgrep.result != 'failure' &&
       needs.trivy.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     permissions:
       contents: read
       packages: write
@@ -209,7 +214,7 @@ jobs:
       always() &&
       needs.config.outputs.pre_deploy_enabled == 'true' &&
       needs.publish.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -220,7 +225,7 @@ jobs:
     name: Generic
     needs: config
     if: needs.config.outputs.generic_enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -233,7 +238,7 @@ jobs:
     name: Plan
     needs: config
     if: needs.config.outputs.plan_enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     permissions:
       id-token: write
       contents: read
@@ -256,7 +261,7 @@ jobs:
       always() &&
       needs.config.outputs.checkov_tf_enabled == 'true' &&
       needs.plan.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -278,7 +283,7 @@ jobs:
       needs.config.outputs.deploy_enabled == 'true' &&
       needs.pre_deploy.result != 'failure' &&
       (needs.plan.result == 'success' || needs.plan.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     permissions:
       id-token: write
       contents: read
@@ -310,7 +315,7 @@ jobs:
       always() &&
       needs.config.outputs.post_deploy_enabled == 'true' &&
       needs.deploy.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -324,7 +329,7 @@ jobs:
       always() &&
       needs.config.outputs.release_enabled == 'true' &&
       needs.deploy.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     permissions:
       id-token: write
       contents: write
@@ -355,7 +360,7 @@ jobs:
       always() &&
       needs.config.outputs.ecs_deploy_enabled == 'true' &&
       needs.release.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     # Environment gate — injects ECS_DEPLOY_ROLE secret for the target env (dev/qa/prod)
     environment: ${{ needs.config.outputs.deploy_environment }}
     permissions:

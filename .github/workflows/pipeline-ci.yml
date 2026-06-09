@@ -15,12 +15,17 @@ on:
         type: string
         required: false
         default: ""
+      runner:
+        description: "Runner label(s) — defaults to ubuntu-latest. Pass a JSON array string for self-hosted (e.g. '[\"self-hosted\",\"dropstat\",\"linux\",\"x64\"]')."
+        type: string
+        required: false
+        default: "ubuntu-latest"
   workflow_dispatch:
 
 jobs:
   config:
     name: Config
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     env:
       PIPELINE_PHASE: ci
@@ -56,7 +61,7 @@ jobs:
     name: Compile
     needs: config
     if: needs.config.outputs.compile_enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
@@ -82,7 +87,7 @@ jobs:
       always() &&
       needs.config.outputs.unit_test_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
@@ -97,7 +102,7 @@ jobs:
       always() &&
       needs.config.outputs.linter_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
@@ -112,7 +117,7 @@ jobs:
       always() &&
       needs.config.outputs.semgrep_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -132,7 +137,7 @@ jobs:
       always() &&
       needs.config.outputs.sonarqube_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
@@ -150,7 +155,7 @@ jobs:
       always() &&
       needs.config.outputs.trivy_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -165,7 +170,7 @@ jobs:
     name: Checkov
     needs: config
     if: needs.config.outputs.checkov_enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
@@ -184,7 +189,7 @@ jobs:
       needs.linter.result != 'failure' &&
       needs.semgrep.result != 'failure' &&
       needs.trivy.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -214,7 +219,7 @@ jobs:
     name: Generic
     needs: config
     if: needs.config.outputs.generic_enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
@@ -228,7 +233,7 @@ jobs:
     name: Plan
     needs: config
     if: needs.config.outputs.plan_enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       id-token: write
@@ -252,7 +257,7 @@ jobs:
       always() &&
       needs.config.outputs.checkov_tf_enabled == 'true' &&
       needs.plan.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4.2.2
