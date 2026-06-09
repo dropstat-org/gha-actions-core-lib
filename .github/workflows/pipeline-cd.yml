@@ -55,7 +55,7 @@ jobs:
   config:
     name: Config
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 10
+    timeout-minutes: 60
     env:
       PIPELINE_PHASE: cd
       PIPELINE_REF: ${{ inputs.deploy_ref }}
@@ -88,7 +88,7 @@ jobs:
     needs: config
     if: needs.config.outputs.plan_enabled == 'true'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 10
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -114,7 +114,7 @@ jobs:
       needs.config.outputs.checkov_tf_enabled == 'true' &&
       needs.plan.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
         with:
@@ -131,7 +131,7 @@ jobs:
       needs.config.outputs.pre_deploy_enabled == 'true' &&
       needs.plan.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
         with:
@@ -175,7 +175,7 @@ jobs:
     name: Deploy
     needs: [config, plan, pre_deploy, approval]
     environment: ${{ needs.config.outputs.deploy_environment }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     if: |
       always() &&
       needs.config.outputs.deploy_enabled == 'true' &&
@@ -221,7 +221,7 @@ jobs:
     needs: [config]
     if: needs.config.outputs.ecs_deploy_enabled == 'true'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     environment: ${{ needs.config.outputs.deploy_environment }}
     permissions:
       id-token: write
@@ -265,7 +265,7 @@ jobs:
       (needs.ecs_deploy.result == 'success' || needs.ecs_deploy.result == 'skipped') &&
       (needs.deploy.result == 'success' || needs.ecs_deploy.result == 'success')
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 10
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: write
@@ -303,7 +303,7 @@ jobs:
       needs.deploy.result != 'failure' &&
       needs.ecs_deploy.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
         with:
