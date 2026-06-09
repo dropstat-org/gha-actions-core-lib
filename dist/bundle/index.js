@@ -1271,7 +1271,6 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.CheckovStage = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const exec = __importStar(__nccwpck_require__(95236));
-const os = __importStar(__nccwpck_require__(70857));
 const AbstractAnalyzerStage_1 = __nccwpck_require__(69751);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const SarifUploader_1 = __nccwpck_require__(28020);
@@ -1291,9 +1290,7 @@ class CheckovStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
         }
         core.info(`Installing checkov ${version}...`);
         await exec.exec('pip', ['install', `checkov==${version}`, '--quiet']);
-        const localBin = `${os.homedir()}/.local/bin`;
-        await exec.exec('ln', ['-sf', `${localBin}/checkov`, '/usr/local/bin/checkov']);
-        core.info(`Symlinked checkov from ${localBin} → /usr/local/bin`);
+        // ~/.local/bin is in PATH on our custom AMI via /etc/profile.d/local-bin.sh
     }
     buildArgs(stage, softFail) {
         const framework = stage.checkov?.framework;
@@ -1377,7 +1374,6 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.CheckovTfStage = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const exec = __importStar(__nccwpck_require__(95236));
-const os = __importStar(__nccwpck_require__(70857));
 const AbstractAnalyzerStage_1 = __nccwpck_require__(69751);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const StageTransfer_1 = __nccwpck_require__(24734);
@@ -1414,9 +1410,7 @@ class CheckovTfStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
         }
         Logger_1.Logger.info(`Installing checkov ${version}...`);
         await exec.exec('pip', ['install', `checkov==${version}`, '--quiet']);
-        const localBin = `${os.homedir()}/.local/bin`;
-        await exec.exec('ln', ['-sf', `${localBin}/checkov`, '/usr/local/bin/checkov']);
-        Logger_1.Logger.info(`Symlinked checkov from ${localBin} → /usr/local/bin`);
+        // ~/.local/bin is in PATH on our custom AMI via /etc/profile.d/local-bin.sh
     }
     /**
      * Resolves soft-fail mode for this run.
@@ -1605,7 +1599,6 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SemgrepStage = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const exec = __importStar(__nccwpck_require__(95236));
-const os = __importStar(__nccwpck_require__(70857));
 const AbstractAnalyzerStage_1 = __nccwpck_require__(69751);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const SarifUploader_1 = __nccwpck_require__(28020);
@@ -1626,15 +1619,7 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
         }
         core.info(`Installing Semgrep ${version}...`);
         await exec.exec('pip', ['install', `semgrep==${version}`, '--quiet']);
-        // pip --user installs semgrep binaries to ~/.local/bin which is not in PATH on
-        // self-hosted runners. The semgrep binary (osemgrep) also calls pysemgrep at runtime,
-        // so both must be findable via PATH. Symlink both into /usr/local/bin (writable on
-        // our custom AMI via chmod o+w).
-        const localBin = `${os.homedir()}/.local/bin`;
-        for (const bin of ['semgrep', 'pysemgrep']) {
-            await exec.exec('ln', ['-sf', `${localBin}/${bin}`, `/usr/local/bin/${bin}`]);
-        }
-        core.info(`Symlinked semgrep + pysemgrep from ${localBin} → /usr/local/bin`);
+        // ~/.local/bin is in PATH on our custom AMI via /etc/profile.d/local-bin.sh
     }
     async run(stage) {
         const end = this.startGroup(`semgrep: ${stage.name}`);
