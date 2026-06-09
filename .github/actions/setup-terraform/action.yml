@@ -38,6 +38,8 @@ runs:
       uses: dropstat-org/gha-actions-core-lib@main
       with:
         stage: setup-terragrunt
+      env:
+        TERRAGRUNT_VERSION: ${{ inputs.terragrunt-version }}
 
     - name: Configure Terraform plugin cache
       shell: bash
