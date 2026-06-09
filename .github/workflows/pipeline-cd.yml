@@ -155,7 +155,7 @@ jobs:
       needs.plan.result != 'failure' &&
       needs.pre_deploy.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
+    timeout-minutes: 5
     permissions:
       issues: write
     steps:
@@ -187,6 +187,8 @@ jobs:
         with:
           ref: ${{ inputs.deploy_ref }}
       - name: Setup AWS credentials
+        # Terraform release only creates a git tag — no ECR/AWS needed.
+        if: needs.config.outputs.ActionsCoreLib_type != 'terraform'
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
