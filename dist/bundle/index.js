@@ -6813,14 +6813,18 @@ class TerraformStateCollector {
             cwd: modulePath,
             ignoreReturnCode: true,
             silent: true,
+            env: { ...process.env, TF_INPUT: '0', TF_IN_AUTOMATION: '1' },
             listeners: {
                 stdout: (d) => { stdout += d.toString(); },
             },
         };
         // Try `terragrunt show -json` first (reads from Terragrunt cache),
         // then fall back to plain `terraform show -json` for raw TF dirs.
+        // </dev/null + --non-interactive + TF_INPUT=0 prevent an implicit
+        // `init` (for not-yet-initialized modules) from hanging forever on
+        // a stdin prompt with stderr silenced.
         await exec.exec('bash', ['-c',
-            'terragrunt show -json 2>/dev/null || terraform show -json 2>/dev/null'
+            'terragrunt --non-interactive show -json </dev/null 2>/dev/null || terraform show -json </dev/null 2>/dev/null'
         ], opts);
         const json = stdout.trim();
         if (!json || !json.startsWith('{'))
