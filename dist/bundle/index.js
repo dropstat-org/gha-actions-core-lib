@@ -6727,19 +6727,25 @@ class TerraformStateCollector {
             Logger_1.Logger.warn('[StateCollector] no modules found — skipping state collection');
             return [];
         }
-        Logger_1.Logger.info(`[StateCollector] found ${modules.length} module(s), pulling state in parallel…`);
-        const settled = await Promise.allSettled(modules.map(async (modulePath, idx) => {
-            const outFile = `/tmp/tg-state-${idx}.json`;
-            const ok = await this.pullModuleState(modulePath, outFile);
-            if (ok) {
-                Logger_1.Logger.info(`[StateCollector] state pulled → ${path.basename(modulePath)} → ${outFile}`);
-                return { modulePath, filePath: outFile };
+        const CONCURRENCY = 4;
+        Logger_1.Logger.info(`[StateCollector] found ${modules.length} module(s), pulling state (concurrency=${CONCURRENCY})…`);
+        const results = [];
+        for (let i = 0; i < modules.length; i += CONCURRENCY) {
+            const batch = modules.slice(i, i + CONCURRENCY);
+            const settled = await Promise.allSettled(batch.map(async (modulePath, idx) => {
+                const outFile = `/tmp/tg-state-${i + idx}.json`;
+                const ok = await this.pullModuleState(modulePath, outFile);
+                if (ok) {
+                    Logger_1.Logger.info(`[StateCollector] state pulled → ${path.basename(modulePath)} → ${outFile}`);
+                    return { modulePath, filePath: outFile };
+                }
+                return null;
+            }));
+            for (const r of settled) {
+                if (r.status === 'fulfilled' && r.value !== null)
+                    results.push(r.value);
             }
-            return null;
-        }));
-        const results = settled
-            .filter((r) => r.status === 'fulfilled' && r.value !== null)
-            .map(r => r.value);
+        }
         Logger_1.Logger.info(`[StateCollector] ${results.length}/${modules.length} modules have state`);
         return results;
     }
