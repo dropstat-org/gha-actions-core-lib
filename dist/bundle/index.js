@@ -6954,36 +6954,51 @@ class TerragruntStateSummary {
             return [];
         }
         Logger_1.Logger.info(`TerragruntStateSummary: found ${modulePaths.length} modules`);
-        // ── Step 2: run show -json per module ──────────────────────────────────
+        // ── Step 2: run show -json per module, batched to avoid overload ───────
+        const CONCURRENCY = 4;
+        Logger_1.Logger.info(`TerragruntStateSummary: pulling state (concurrency=${CONCURRENCY})…`);
         const results = [];
-        for (const modulePath of modulePaths) {
-            // modulePath may be relative (e.g. "admin") — resolve against workingDir
-            const fullPath = path.isAbsolute(modulePath)
-                ? modulePath
-                : path.join(workingDir, modulePath);
-            let stdout = '';
-            const exitCode = await exec.exec('terragrunt', ['--working-dir', fullPath, '--non-interactive', 'show', '-json'], {
-                ignoreReturnCode: true,
-                silent: true, // suppress raw JSON from runner logs
-                listeners: {
-                    stdout: (d) => { stdout += d.toString(); },
-                    stderr: () => { },
-                },
-            });
-            if (exitCode !== 0 || !stdout.trim().startsWith('{')) {
-                Logger_1.Logger.warn(`TerragruntStateSummary: skipping ${modulePath} (no state or error)`);
-                continue;
-            }
-            try {
-                const parsed = JSON.parse(stdout.trim());
-                const resources = this.extractResources(parsed);
-                results.push({ modulePath, resources });
-            }
-            catch {
-                Logger_1.Logger.warn(`TerragruntStateSummary: could not parse state for ${modulePath}`);
+        for (let i = 0; i < modulePaths.length; i += CONCURRENCY) {
+            const batch = modulePaths.slice(i, i + CONCURRENCY);
+            const settled = await Promise.allSettled(batch.map(modulePath => this.fetchModuleState(workingDir, modulePath)));
+            for (const r of settled) {
+                if (r.status === 'fulfilled' && r.value !== null)
+                    results.push(r.value);
             }
         }
         return results;
+    }
+    /**
+     * Runs `terragrunt show -json` for a single module and parses its resources.
+     * Returns null if the module has no state or could not be parsed.
+     */
+    static async fetchModuleState(workingDir, modulePath) {
+        // modulePath may be relative (e.g. "admin") — resolve against workingDir
+        const fullPath = path.isAbsolute(modulePath)
+            ? modulePath
+            : path.join(workingDir, modulePath);
+        let stdout = '';
+        const exitCode = await exec.exec('terragrunt', ['--working-dir', fullPath, '--non-interactive', 'show', '-json'], {
+            ignoreReturnCode: true,
+            silent: true, // suppress raw JSON from runner logs
+            listeners: {
+                stdout: (d) => { stdout += d.toString(); },
+                stderr: () => { },
+            },
+        });
+        if (exitCode !== 0 || !stdout.trim().startsWith('{')) {
+            Logger_1.Logger.warn(`TerragruntStateSummary: skipping ${modulePath} (no state or error)`);
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(stdout.trim());
+            const resources = this.extractResources(parsed);
+            return { modulePath, resources };
+        }
+        catch {
+            Logger_1.Logger.warn(`TerragruntStateSummary: could not parse state for ${modulePath}`);
+            return null;
+        }
     }
     /**
      * Discovers all Terragrunt module paths using output-module-groups.
