@@ -5372,8 +5372,9 @@ class PlanExtractor {
         const cleanCmd = cmd.replace(/\s+-{1,2}out(?:=\S+|\s+\S+)/g, '').trimEnd();
         if (runAll) {
             const outDir = this.outDirName(cmdIndex);
-            // --out-dir mirrors the unit tree: <outDir>/<relative-unit-path>/tfplan.tfplan
-            const planCmd = `${cleanCmd} -- --out-dir ${outDir}`;
+            // --out-dir is a terragrunt-level flag (not passed via `--` to terraform):
+            // it mirrors the unit tree: <outDir>/<relative-unit-path>/tfplan.tfplan
+            const planCmd = `${cleanCmd} --out-dir ${outDir}`;
             return [planCmd, ''];
         }
         const binary = this.rawBinaryName(cmdIndex);
