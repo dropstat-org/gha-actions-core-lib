@@ -2882,34 +2882,42 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
             ?? this.config.metadata.projectId;
         // ── Phase 1: execute commands ──────────────────────────────────────────
         // Plan commands are split into: [plan --out binary] + [show -json > json]
+        // for single-module plans, or [plan --out-dir <dir>] for run-all plans.
         // Non-plan commands (state list, state rm, import) run as-is.
-        // For each plan command we also capture `output-module-groups` (best-effort)
-        // so the Job Summary can show the module path alongside the account name.
         const planIndices = [];
-        const modulePathsByCmd = new Map(); // cmdIndex → ordered module paths
+        const discoveredModulesByCmd = new Map();
         for (const [i, cmd] of commands.entries()) {
             const cmdIndex = i + 1;
             if (PlanExtractor_1.PlanExtractor.isPlanCommand(cmd)) {
                 planIndices.push(cmdIndex);
+                const { runAll, workingDir } = PlanExtractor_1.PlanExtractor.parseFlags(cmd);
                 const [planCmd, showCmd] = extractor.buildRunCommands(cmd, cmdIndex);
                 core.info(`[plan ${cmdIndex}] ${cmd}`);
-                await this.execCommands([planCmd, showCmd], this._effectiveTools(stage));
-                // Capture module groups — mirrors PreDeployStage.groovy line 59.
-                // Failure is non-fatal: the plan summary still works without paths.
-                try {
-                    const moduleGroupsCmd = extractor.buildModuleGroupsCommand(cmd);
-                    const { stdout } = await exec.getExecOutput('bash', ['-c', moduleGroupsCmd], {
+                await this.execCommands([planCmd], this._effectiveTools(stage));
+                if (runAll) {
+                    // ── Per-module discovery via --out-dir ────────────────────────────
+                    // --out-dir mirrors the unit tree: <outDir>/<relative-unit-path>/tfplan.tfplan
+                    // The filesystem path IS the module path — no positional pairing with
+                    // a separately-run `list --dag`/`output-module-groups`, which could
+                    // desync from the JSONL line order of a parallel `run --all show -json`.
+                    const findCmd = extractor.buildFindModulesCommand(cmdIndex, workingDir);
+                    const { stdout } = await exec.getExecOutput('bash', ['-c', findCmd], {
                         ignoreReturnCode: true,
                         silent: true,
                     });
-                    const paths = PlanExtractor_1.PlanExtractor.flattenModuleGroups(stdout);
-                    if (paths.length > 0) {
-                        modulePathsByCmd.set(cmdIndex, paths);
-                        core.info(`[plan ${cmdIndex}] module paths resolved: ${paths.join(', ')}`);
+                    const modulePaths = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+                    core.info(`[plan ${cmdIndex}] discovered ${modulePaths.length} module(s): ${modulePaths.join(', ')}`);
+                    const modules = [];
+                    for (const modulePath of modulePaths) {
+                        const { cmd: showModCmd, jsonFile } = extractor.buildPerModuleShowCommand(cmdIndex, modulePath, workingDir);
+                        await this.execCommands([showModCmd], this._effectiveTools(stage));
+                        modules.push({ modulePath, jsonFile });
                     }
+                    discoveredModulesByCmd.set(cmdIndex, modules);
                 }
-                catch {
-                    core.info(`[plan ${cmdIndex}] output-module-groups not available — paths omitted from summary`);
+                else {
+                    await this.execCommands([showCmd], this._effectiveTools(stage));
+                    discoveredModulesByCmd.set(cmdIndex, [{ modulePath: '', jsonFile: extractor.rawJsonName(cmdIndex) }]);
                 }
             }
             else {
@@ -2920,15 +2928,12 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
         if (planIndices.length === 0) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.NO_PLAN_COMMAND_FOUND, `Plan stage '${stage.name}' must contain at least one terragrunt plan command`);
         }
-        // ── Phase 2: parse JSONL → per-account files ───────────────────────────
-        // Each raw plan file is JSONL (one JSON object per module/account per line).
+        // ── Phase 2: parse per-module JSON → per-account files ──────────────────
         // TerragruntUtils.getVarEnvIdFromPlan reads planJson.variables.env_id.value.
-        // Module paths (from output-module-groups) are threaded through so the summary
-        // can display them — mirrors TerragruntUtils.getFolderModule (moduleCount logic).
         const allExtracted = [];
         for (const cmdIndex of planIndices) {
-            const modulePaths = modulePathsByCmd.get(cmdIndex);
-            const extracted = extractor.extractPerAccountPlans(cmdIndex, fallbackAccount, modulePaths);
+            const modules = discoveredModulesByCmd.get(cmdIndex) ?? [];
+            const extracted = extractor.extractPerAccountPlans(cmdIndex, fallbackAccount, modules);
             allExtracted.push(...extracted);
         }
         // Build filePath → modulePath lookup for the summary writer.
@@ -5265,6 +5270,21 @@ const path = __importStar(__nccwpck_require__(16928));
  *   terragrunt --working-dir <dir> run-all plan
  *   terragrunt run-all plan --working-dir <dir>
  *   (legacy) terragrunt run-all plan --terragrunt-working-dir <dir>
+ *
+ * ── Per-module discovery (run-all) ──────────────────────────────────────────
+ * For `run --all plan`, Terragrunt's `--out-dir <dir>` flag mirrors the unit
+ * tree under `<dir>`, writing each unit's native plan to
+ * `<dir>/<relative-unit-path>/tfplan.tfplan`. This gives us the module path
+ * for FREE from the filesystem — no positional pairing with `output-module-groups`
+ * / `list --dag` is needed, which previously broke when `run --all show -json`
+ * emitted JSONL lines in completion order (parallel execution) rather than the
+ * DAG order returned by `list --dag`, causing plan summaries to be labeled with
+ * the wrong module.
+ *
+ * Each discovered unit gets its own `show -json` invocation (run with
+ * `--working-dir <relative-unit-path>`), producing one clean JSON file per
+ * module — `extractPerAccountPlans` then just reads those files 1:1, no JSONL
+ * splitting or index bookkeeping required.
  */
 class PlanExtractor {
     projectId;
@@ -5299,55 +5319,92 @@ class PlanExtractor {
     }
     // ── File naming ───────────────────────────────────────────────────────────
     /**
-     * Raw binary name produced by `plan --out`.
+     * Raw binary name produced by `plan --out` (single-module / non run-all only).
      * e.g. tfplan1-myproject-myservice-1.0.0-abc1234.binary
      */
     rawBinaryName(cmdIndex) {
         return `tfplan${cmdIndex}-${this.projectId}-${this.serviceId}-${this.versionTag}.binary`;
     }
     /**
-     * Raw JSONL name produced by `show -json` (one JSON object per line = one module).
+     * Raw JSON name produced by `show -json` (single-module / non run-all only).
      * e.g. tfplan1-myproject-myservice-1.0.0-abc1234.json
      */
     rawJsonName(cmdIndex) {
         return `tfplan${cmdIndex}-${this.projectId}-${this.serviceId}-${this.versionTag}.json`;
     }
     /**
-     * Per-account file name written after parsing the JSONL.
+     * Per-account file name written after parsing the raw plan(s).
      * e.g. tfplan1-my-account.json
      */
     static perAccountName(cmdIndex, accountName) {
         return `tfplan${cmdIndex}-${accountName}.json`;
     }
+    /** Directory passed to `--out-dir` for a given plan command, e.g. "tfplan-out1". */
+    outDirName(cmdIndex) {
+        return `tfplan-out${cmdIndex}`;
+    }
+    /**
+     * Raw per-module JSON file name (before name resolution), derived from the
+     * module's relative path so it's collision-free across units.
+     * e.g. "storage/aurora" → "tfplan1-raw-storage__aurora.json"
+     */
+    rawModuleJsonName(cmdIndex, modulePath) {
+        const safe = modulePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').replace(/\//g, '__');
+        return `tfplan${cmdIndex}-raw-${safe}.json`;
+    }
     // ── Command builders ──────────────────────────────────────────────────────
     /**
      * Returns the two shell commands that replace the original plan invocation:
-     *   1. original plan command  + --out <binary>
-     *   2. terragrunt [run-all] show -json <binary> [--terragrunt-working-dir <dir>]  > <json>
+     *   1. original plan command + --out <binary>          (single-module)
+     *      original plan command + --out-dir <dir>          (run-all)
+     *   2. terragrunt show -json <binary> > <json>           (single-module)
+     *      "" — discovery + per-module show is built separately for run-all
+     *      via `buildFindModulesCommand` / `buildPerModuleShowCommand`.
      *
-     * Mirrors lines 54-55 in PreDeployStage.groovy.
+     * For run-all, the second element is an empty string (the caller must use
+     * the per-module discovery commands instead).
      */
     buildRunCommands(cmd, cmdIndex) {
         const { runAll, workingDir } = PlanExtractor.parseFlags(cmd);
-        const binary = this.rawBinaryName(cmdIndex);
-        const json = this.rawJsonName(cmdIndex);
-        const ra = runAll ? 'run-all ' : '';
         const wd = workingDir ? ` --working-dir ${workingDir}` : '';
         // Strip any user-supplied -out / --out so we control the output filename.
         // Handles both forms: --out=file  and  --out file
         const cleanCmd = cmd.replace(/\s+-{1,2}out(?:=\S+|\s+\S+)/g, '').trimEnd();
-        const globalFlags = `${runAll ? '--non-interactive' : ''}${wd}`.trim();
-        const globalPrefix = globalFlags ? ` ${globalFlags}` : '';
-        // v1.0: Terraform flags separated from Terragrunt flags with --
+        if (runAll) {
+            const outDir = this.outDirName(cmdIndex);
+            // --out-dir mirrors the unit tree: <outDir>/<relative-unit-path>/tfplan.tfplan
+            const planCmd = `${cleanCmd} -- --out-dir ${outDir}`;
+            return [planCmd, ''];
+        }
+        const binary = this.rawBinaryName(cmdIndex);
+        const json = this.rawJsonName(cmdIndex);
         const planCmd = `${cleanCmd} -- --out ${binary}`;
-        // v1.0: show command — Terragrunt global flags before run-all, terraform flags after --
-        // --queue-ignore-errors: continue if a module fails during show.
-        // grep '^{': filter out Terragrunt log lines interleaved with JSON output
-        // so the resulting file is clean JSONL (one plan JSON object per line).
-        const showCmd = runAll
-            ? `terragrunt${globalPrefix} run --all --queue-ignore-errors show -- -json ${binary} 2>/dev/null | grep '^{' > ${json}`
-            : `terragrunt${globalPrefix} show -- -json ${binary} 2>/dev/null | grep '^{' > ${json}`;
+        const showCmd = `terragrunt${wd} show -- -json ${binary} 2>/dev/null | grep '^{' > ${json}`;
         return [planCmd, showCmd];
+    }
+    /**
+     * Shell command that discovers per-module native plan files written by
+     * `--out-dir` and prints their unit-relative paths, one per line.
+     *
+     * e.g. given <outDir>/storage/aurora/tfplan.tfplan, prints "storage/aurora".
+     */
+    buildFindModulesCommand(cmdIndex, workingDir) {
+        const outDir = this.outDirName(cmdIndex);
+        const base = workingDir ? `${workingDir}/${outDir}` : outDir;
+        return `find ${base} -name tfplan.tfplan 2>/dev/null | sed -E "s#^${escapeForSed(base)}/##; s#/tfplan\\.tfplan\\$##"`;
+    }
+    /**
+     * Builds the `show -json` command for a single discovered module.
+     * Runs with `--working-dir <modulePath>` (relative to the run-all invocation)
+     * so the resulting plan JSON reflects that module's configuration.
+     */
+    buildPerModuleShowCommand(cmdIndex, modulePath, workingDir) {
+        const outDir = this.outDirName(cmdIndex);
+        const jsonFile = this.rawModuleJsonName(cmdIndex, modulePath);
+        const unitDir = workingDir ? `${workingDir}/${modulePath}` : modulePath;
+        const planFile = workingDir ? `${workingDir}/${outDir}/${modulePath}/tfplan.tfplan` : `${outDir}/${modulePath}/tfplan.tfplan`;
+        const cmd = `terragrunt --working-dir ${unitDir} show -- -json ${planFile} 2>/dev/null | grep '^{' > ${jsonFile}`;
+        return { cmd, jsonFile };
     }
     /**
      * Command to discover all modules in DAG order.
@@ -5359,75 +5416,108 @@ class PlanExtractor {
      *
      * The first command that produces valid JSON wins.
      * Output is parsed by `flattenModuleGroups()` which handles all three formats.
+     *
+     * Used by TerragruntStateSummary for module discovery (unrelated to plan extraction).
      */
     buildModuleGroupsCommand(cmd) {
         const { workingDir } = PlanExtractor.parseFlags(cmd);
         const wd = workingDir ? ` --working-dir ${workingDir}` : '';
-        // Bash: try each command; output the first that produces non-empty stdout.
         return (`(terragrunt${wd} list --format=json --dag 2>/dev/null ||` +
             ` terragrunt${wd} find --dag --json 2>/dev/null ||` +
             ` terragrunt output-module-groups${wd} 2>/dev/null)`);
     }
+    /**
+     * Parses the output of `buildModuleGroupsCommand` (array, grouped-object, or
+     * keyed-object formats) into a flat list of module paths.
+     * Always returns [] on empty / unparseable input.
+     */
+    static flattenModuleGroups(json) {
+        if (!json || !json.trim())
+            return [];
+        try {
+            const parsed = JSON.parse(json.trim());
+            if (Array.isArray(parsed)) {
+                return parsed
+                    .map(entry => {
+                    if (typeof entry === 'string')
+                        return entry;
+                    if (typeof entry === 'object' && entry !== null && 'path' in entry) {
+                        return String(entry.path);
+                    }
+                    return null;
+                })
+                    .filter((p) => typeof p === 'string' && p.length > 0);
+            }
+            if (typeof parsed === 'object' && parsed !== null) {
+                const obj = parsed;
+                const values = Object.values(obj);
+                if (values.length > 0 && Array.isArray(values[0])) {
+                    const groups = obj;
+                    const groupValues = Object.values(groups);
+                    if (groupValues.length === 0)
+                        return [];
+                    if (groupValues.length === 1)
+                        return groupValues[0];
+                    return groupValues.map(g => g[0] ?? '');
+                }
+                return Object.keys(obj).filter(k => k.length > 0);
+            }
+            return [];
+        }
+        catch {
+            return [];
+        }
+    }
     // ── Plan parsing ──────────────────────────────────────────────────────────
     /**
-     * Reads the raw JSONL plan file and writes one per-module JSON for each line.
-     * Returns the list of extracted plans (file paths + optional module paths).
+     * Reads one or more per-module raw JSON files (each containing a single
+     * terraform plan JSON object) and writes a per-account file for each.
      *
      * Account / module name resolution (priority order):
      *   1. `planJson.variables.env_id.value`  — explicit per-module identifier (platform-infra style)
-     *   2. Normalized module path             — dynamic discovery from `buildModuleGroupsCommand`
-     *      e.g. "/abs/path/live/dev/ecs/nursa" → "ecs-nursa"
+     *   2. Normalized module path             — from the discovered `modulePath`
+     *      e.g. "storage/aurora" → "storage-aurora"
      *   3. `fallbackAccount`                  — projectId, used when no path is available
      *
      * Deduplication: when multiple modules resolve to the same name (e.g. all fall
      * back to the same projectId and no module paths were discovered), a `-N` suffix
      * is appended to prevent file overwrites: "dropstat", "dropstat-2", "dropstat-3".
-     *
-     * @param modulePaths  Ordered list from `PlanExtractor.flattenModuleGroups()`.
-     *                     Must be in the same order as lines in the JSONL file
-     *                     (both reflect the Terragrunt DAG execution order).
      */
-    extractPerAccountPlans(cmdIndex, fallbackAccount, modulePaths) {
-        const rawFile = this.rawJsonName(cmdIndex);
-        if (!fs.existsSync(rawFile)) {
-            core.warning(`PlanExtractor: raw plan file not found: ${rawFile}`);
-            return [];
-        }
-        const lines = fs
-            .readFileSync(rawFile, 'utf8')
-            .split('\n')
-            .filter(l => l.trim().length > 0);
+    extractPerAccountPlans(cmdIndex, fallbackAccount, modules) {
         const created = [];
-        let moduleIndex = 0;
-        // Track how many times each base name has been used — prevents file overwrites
-        // when env_id is absent and module paths are unavailable (all fall back to projectId).
         const nameCount = new Map();
-        for (const line of lines) {
-            let planJson;
-            try {
-                planJson = JSON.parse(line);
-            }
-            catch {
-                core.warning(`PlanExtractor: skipping non-JSON line in ${rawFile}`);
+        for (const mod of modules) {
+            if (!fs.existsSync(mod.jsonFile)) {
+                core.warning(`PlanExtractor: raw plan file not found: ${mod.jsonFile}`);
                 continue;
             }
-            const modulePath = modulePaths?.[moduleIndex];
+            const raw = fs.readFileSync(mod.jsonFile, 'utf8').trim();
+            if (!raw) {
+                core.warning(`PlanExtractor: empty plan file: ${mod.jsonFile}`);
+                continue;
+            }
+            let planJson;
+            try {
+                // Defensive: take the first JSON object if multiple lines slipped through.
+                const firstLine = raw.split('\n')[0];
+                planJson = JSON.parse(firstLine);
+            }
+            catch {
+                core.warning(`PlanExtractor: skipping non-JSON file: ${mod.jsonFile}`);
+                continue;
+            }
             // ── Name resolution ──────────────────────────────────────────────────
             const envId = PlanExtractor.resolveAccountName(planJson, '');
             let baseName;
             if (envId) {
-                // Priority 1: explicit env_id variable in the plan (platform-infra repos)
                 baseName = envId;
             }
-            else if (modulePath) {
-                // Priority 2: derive a readable name from the discovered module path
-                baseName = PlanExtractor.normalizeModulePath(modulePath);
+            else if (mod.modulePath) {
+                baseName = PlanExtractor.normalizeModulePath(mod.modulePath);
             }
             else {
-                // Priority 3: project-level fallback
                 baseName = fallbackAccount;
             }
-            // Deduplicate: append counter starting from 2 for repeated base names
             const seen = nameCount.get(baseName) ?? 0;
             nameCount.set(baseName, seen + 1);
             const accountName = seen === 0 ? baseName : `${baseName}-${seen + 1}`;
@@ -5435,9 +5525,8 @@ class PlanExtractor {
             const filePath = PlanExtractor.perAccountName(cmdIndex, accountName);
             fs.writeFileSync(filePath, JSON.stringify(planJson, null, 2), 'utf8');
             core.info(`Extracted plan → ${filePath}  (account: ${accountName}` +
-                `${modulePath ? `  path: ${modulePath}` : ''})`);
-            created.push({ cmdIndex, accountName, filePath, modulePath });
-            moduleIndex++;
+                `${mod.modulePath ? `  path: ${mod.modulePath}` : ''})`);
+            created.push({ cmdIndex, accountName, filePath, modulePath: mod.modulePath || undefined });
         }
         return created;
     }
@@ -5450,7 +5539,7 @@ class PlanExtractor {
         const envId = vars?.env_id?.value;
         return typeof envId === 'string' && envId.length > 0 ? envId : fallback;
     }
-    // ── Module-groups helpers ─────────────────────────────────────────────────
+    // ── Module path helpers ───────────────────────────────────────────────────
     /**
      * Normalizes an absolute or relative module path to a short, filesystem-safe
      * identifier suitable for use as an artifact / plan-summary name.
@@ -5489,90 +5578,25 @@ class PlanExtractor {
             .replace(/^-|-$/g, '')
             .toLowerCase();
     }
-    /**
-     * Parses the JSON output of any Terragrunt module-discovery command and returns
-     * an **ordered flat list** of module paths — one entry per module.
-     *
-     * Handles three output formats automatically:
-     *
-     *   Array (v1.0 `list --format=json --dag`):
-     *     ["path/to/module1", "path/to/module2"]
-     *
-     *   Grouped object (legacy `output-module-groups` / `find --dag --json`):
-     *     {"Group 1": ["path1", "path2"], "Group 2": ["path3"]}
-     *     → Single group:   all paths in order.
-     *     → Multiple groups: first path from each group in group order.
-     *       (mirrors TerragruntUtils getFolderModule / mgArray[moduleCount][0])
-     *
-     *   Object with path keys (some `find` variants):
-     *     {"path/module1": {...}, "path/module2": {...}}
-     *     → keys are treated as paths.
-     *
-     * Always returns [] on empty / unparseable input — safe to call in all cases.
-     */
-    static flattenModuleGroups(json) {
-        if (!json || !json.trim())
-            return [];
-        try {
-            const parsed = JSON.parse(json.trim());
-            // ── Array format ─────────────────────────────────────────────────────
-            // `terragrunt list --format=json [--dag]` → ["path1", "path2", ...]
-            if (Array.isArray(parsed)) {
-                return parsed
-                    .map(entry => {
-                    if (typeof entry === 'string')
-                        return entry;
-                    // Some versions emit [{"path": "..."}, ...] objects
-                    if (typeof entry === 'object' && entry !== null && 'path' in entry) {
-                        return String(entry.path);
-                    }
-                    return null;
-                })
-                    .filter((p) => typeof p === 'string' && p.length > 0);
-            }
-            // ── Object format ────────────────────────────────────────────────────
-            if (typeof parsed === 'object' && parsed !== null) {
-                const obj = parsed;
-                const values = Object.values(obj);
-                // Grouped format: values are arrays of strings → {"Group N": ["path", ...]}
-                if (values.length > 0 && Array.isArray(values[0])) {
-                    const groups = obj;
-                    const groupValues = Object.values(groups);
-                    if (groupValues.length === 0)
-                        return [];
-                    if (groupValues.length === 1)
-                        return groupValues[0];
-                    // Multiple parallel groups: one path per group (DAG execution order).
-                    // Preserve empty strings for empty groups (mirrors legacy behavior).
-                    return groupValues.map(g => g[0] ?? '');
-                }
-                // Keyed format: keys are module paths → {"path/module": {...}}
-                return Object.keys(obj).filter(k => k.length > 0);
-            }
-            return [];
-        }
-        catch {
-            return [];
-        }
-    }
     // ── File filtering ────────────────────────────────────────────────────────
     /**
-     * From a flat list of tfplan*.json paths, removes the raw JSONL parent files
-     * that follow the naming convention tfplan{n}-{projectId}-{serviceId}-*.json.
-     *
-     * The Groovy version uses a TODO comment to delete these; here we exclude them
-     * explicitly so checkov only receives single-object plan files.
+     * From a flat list of tfplan*.json paths, removes the raw parent files
+     * (rawJsonName / rawModuleJsonName patterns) so checkov only receives
+     * single-object per-account plan files.
      */
     filterPerAccountPlans(files) {
         const escapedProject = escapeRegex(this.projectId);
         const escapedService = escapeRegex(this.serviceId);
-        const parentRe = new RegExp(`^tfplan\\d+-${escapedProject}-${escapedService}-`);
+        const parentRe = new RegExp(`^tfplan\\d+-(${escapedProject}-${escapedService}-|raw-)`);
         return files.filter(f => !parentRe.test(path.basename(f)));
     }
 }
 exports.PlanExtractor = PlanExtractor;
 function escapeRegex(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function escapeForSed(s) {
+    return s.replace(/[\\/&]/g, '\\$&');
 }
 //# sourceMappingURL=PlanExtractor.js.map
 
