@@ -5403,8 +5403,11 @@ class PlanExtractor {
         const outDir = this.outDirName(cmdIndex);
         const jsonFile = this.rawModuleJsonName(cmdIndex, modulePath);
         const unitDir = workingDir ? `${workingDir}/${modulePath}` : modulePath;
-        const planFile = workingDir ? `${workingDir}/${outDir}/${modulePath}/tfplan.tfplan` : `${outDir}/${modulePath}/tfplan.tfplan`;
-        const cmd = `terragrunt --working-dir ${unitDir} show -- -json ${planFile} 2>/dev/null | grep '^{' > ${jsonFile}`;
+        const relPlanFile = workingDir ? `${workingDir}/${outDir}/${modulePath}/tfplan.tfplan` : `${outDir}/${modulePath}/tfplan.tfplan`;
+        // terraform runs `show` from the unit's .terragrunt-cache directory, so a
+        // relative plan path won't resolve there — anchor it to the invocation cwd.
+        const planFile = `$(pwd)/${relPlanFile}`;
+        const cmd = `terragrunt --working-dir ${unitDir} show -- -json ${planFile} 2>/dev/null | grep '^{' > ${jsonFile}; true`;
         return { cmd, jsonFile };
     }
     /**
