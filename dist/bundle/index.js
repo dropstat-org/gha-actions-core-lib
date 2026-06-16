@@ -2423,6 +2423,7 @@ class DeployStage extends AbstractDeployStage_1.AbstractDeployStage {
             core.exportVariable('TF_INPUT', 'false');
             core.exportVariable('TERRAGRUNT_NON_INTERACTIVE', 'true');
             core.exportVariable('TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE', 'true');
+            core.exportVariable('TERRAGRUNT_CACHE_PATH', `/tmp/tg-cache/${process.env.GITHUB_RUN_ID ?? 'local'}`);
             // Inject SOPS secrets as TF_VAR_* — masked in logs via core.setSecret()
             await SopsLoader_1.SopsLoader.loadAndInject(BranchDetector_1.BranchUtils.currentEnv());
         }
@@ -2864,6 +2865,9 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
         // Prevents "cached package does not match lock file" errors when modules
         // were initialized on a different platform (e.g. Windows dev → Linux CI).
         core.exportVariable('TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE', 'true');
+        // Isolate Terragrunt module cache per run — prevents stale module code from
+        // a previous run bleeding into the current one on self-hosted persistent runners.
+        core.exportVariable('TERRAGRUNT_CACHE_PATH', `/tmp/tg-cache/${process.env.GITHUB_RUN_ID ?? 'local'}`);
         // Inject SOPS secrets as TF_VAR_* env vars — only if secret files exist in repo root.
         // Values are masked via core.setSecret() → appear as *** in all subsequent log output.
         const env = BranchDetector_1.BranchUtils.currentEnv(); // dev | staging | prod
