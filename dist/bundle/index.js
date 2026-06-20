@@ -2583,11 +2583,11 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     async onMaster(stage) {
         await this.deploy(stage, Environment_1.Environment.PROD);
     }
-    async onFeature(_stage) {
-        core.info('ECSDeployStage: feature branch — no deploy (image built by publish stage)');
+    async onFeature(stage) {
+        await this.deploy(stage, Environment_1.Environment.DEV);
     }
-    async onHotfix(_stage) {
-        core.info('ECSDeployStage: hotfix branch — no deploy (merge to main triggers prod deploy)');
+    async onHotfix(stage) {
+        await this.deploy(stage, Environment_1.Environment.DEV);
     }
     async onDefault(_stage) {
         core.info(`ECSDeployStage: no deploy action for branch '${this.branchType}'`);
@@ -7383,6 +7383,13 @@ const PROMOTE_STAGES = [
     { name: StageName_1.StageName.RELEASE, required: false },
     { name: StageName_1.StageName.ECS_DEPLOY, required: false },
 ];
+// Build once, deploy to dev: feature/* builds the image AND promotes sha→:dev + deploys.
+// Same image is later re-promoted (no rebuild) to :qa/:uat/:prod on release/main.
+const FEATURE_STAGES = [
+    ...BUILD_STAGES,
+    { name: StageName_1.StageName.RELEASE, required: false },
+    { name: StageName_1.StageName.ECS_DEPLOY, required: false },
+];
 class AppWorkflow extends Workflow_1.Workflow {
     /**
      * "gitflow" (default) or "trunk" — read from BRANCHING_STRATEGY env var.
@@ -7405,8 +7412,9 @@ class AppWorkflow extends Workflow_1.Workflow {
             case BranchType_1.BranchType.FEATURE:
             case BranchType_1.BranchType.HOTFIX:
             case BranchType_1.BranchType.HOTFIX_EMERGENCY:
-                // Build the image once here; all subsequent branches only promote.
-                return BUILD_STAGES;
+                // Build once here, promote sha→:dev and deploy to dev immediately.
+                // release/* and main re-promote the same image (no rebuild) to :qa/:uat/:prod.
+                return FEATURE_STAGES;
             case BranchType_1.BranchType.PULL_REQUEST:
                 // Trivy image scan gates the merge — no build, no promote.
                 return [{ name: StageName_1.StageName.TRIVY, required: false }];
