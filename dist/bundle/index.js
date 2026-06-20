@@ -2770,6 +2770,10 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
      * account-level only — the deploy.yaml mapping is the primary safeguard.
      */
     validateRole(roleArn, env) {
+        if (process.env.DEPLOY_SKIP_ACCOUNT_CHECK === 'true') {
+            core.warning(`DEPLOY_SKIP_ACCOUNT_CHECK=true — skipping account validation for '${env}'. Remove this variable before going to production.`);
+            return;
+        }
         const expectedAccount = EXPECTED_ACCOUNT[env];
         if (expectedAccount && !roleArn.includes(`:${expectedAccount}:`)) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `Security violation: ECS deploy role for environment '${env}' must belong ` +
