@@ -2525,10 +2525,21 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ECSDeployStage = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const exec = __importStar(__nccwpck_require__(95236));
+const fs = __importStar(__nccwpck_require__(79896));
+const path = __importStar(__nccwpck_require__(16928));
+const yaml = __importStar(__nccwpck_require__(74281));
 const AbstractBranchStage_1 = __nccwpck_require__(64843);
 const Environment_1 = __nccwpck_require__(27413);
 const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
+// Account IDs that are expected per environment.
+// Same-account environments (uat + prod both in management) rely on deploy.yaml
+// mapping the correct role — account check catches cross-account mistakes only.
+const EXPECTED_ACCOUNT = {
+    [Environment_1.Environment.DEV]: '453531893227',
+    [Environment_1.Environment.UAT]: '174917982419',
+    [Environment_1.Environment.PROD]: '174917982419',
+};
 /**
  * ECSDeployStage — native ECS deployment using task definition registration.
  *
@@ -2614,9 +2625,14 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         //   cluster: $ECS_CLUSTER  →  process.env.ECS_CLUSTER
         // Set per GitHub environment (dev/qa/prod) so same action.yaml works for all.
         const resolve = (val) => val.startsWith('$') ? (process.env[val.slice(1)] ?? val) : val;
-        const cluster = resolve(cfg.cluster);
-        const service = resolve(cfg.service);
-        const container = resolve(cfg.container);
+        // ── deploy.yaml: repo-level ECS config (takes precedence over action.yaml) ─
+        // Cluster, service, container and deploy_role are read from deploy.yaml keyed
+        // by the derived environment. The lib determines the environment from the branch
+        // — callers cannot inject a role for a different environment.
+        const deployYaml = this.readDeployConfig(effectiveEnv);
+        const cluster = deployYaml.cluster ?? resolve(cfg.cluster);
+        const service = deployYaml.service ?? resolve(cfg.service);
+        const container = deployYaml.container ?? resolve(cfg.container);
         // image_tag resolution:
         //   1. cfg.image_tag set and resolves to non-empty → use it (e.g. $SHA_TAG = sha-052c920)
         //   2. cfg.image_tag resolves to empty (env var not set) → fall back to env name (dev/qa/prod)
@@ -2625,14 +2641,15 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const imageTag = resolvedTag || effectiveEnv;
         const waitStable = cfg.wait_for_stability !== false;
         const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
-        // ── Assume ECS deploy role from GitHub environment secret ─────────────────
-        // GitHub injects ECS_DEPLOY_ROLE from the environment matching stage.deploy.environment.
-        // dev env  → ECS_DEPLOY_ROLE = arn:...:453531893227:role/GHA-App-ECS-dev
-        // prod env → ECS_DEPLOY_ROLE = arn:...:PROD_ACCOUNT:role/GHA-App-ECS-prod
-        const deployRole = process.env.ECS_DEPLOY_ROLE;
+        // ── ECS deploy role ───────────────────────────────────────────────────────
+        // Priority: deploy.yaml[env].deploy_role > ECS_DEPLOY_ROLE env var (legacy).
+        // Using deploy.yaml is strongly preferred: the role is keyed by the lib-derived
+        // environment so callers cannot accidentally use a prod role on a dev deploy.
+        const deployRole = deployYaml.deploy_role ?? process.env.ECS_DEPLOY_ROLE;
         if (deployRole) {
-            core.info(`Assuming ECS deploy role: ${deployRole}`);
-            await this.assumeRole(deployRole, `ecs-${env}-${Date.now()}`);
+            this.validateRole(deployRole, effectiveEnv);
+            core.info(`Assuming ECS deploy role: ${deployRole} (source: ${deployYaml.deploy_role ? 'deploy.yaml' : 'ECS_DEPLOY_ROLE env var'})`);
+            await this.assumeRole(deployRole, `ecs-${effectiveEnv}-${Date.now()}`);
         }
         core.info(`\n🚀 ECS Deploy → ${effectiveEnv.toUpperCase()}${effectiveEnv !== env ? ` (manual dispatch from ${this.branchType})` : ''}`);
         core.info(`   cluster:   ${cluster}`);
@@ -2723,6 +2740,43 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         }
     }
     // ── Helpers ────────────────────────────────────────────────────────────────
+    /**
+     * Reads deploy.yaml from the repo root and returns the config block for the
+     * given environment. Returns an empty object when the file is absent or the
+     * environment key is not defined (graceful — fallback to action.yaml / env vars).
+     */
+    readDeployConfig(env) {
+        const filePath = path.join(process.cwd(), 'deploy.yaml');
+        if (!fs.existsSync(filePath))
+            return {};
+        try {
+            const raw = fs.readFileSync(filePath, 'utf8');
+            const cfg = yaml.load(raw);
+            const envCfg = cfg?.environments?.[env] ?? {};
+            if (Object.keys(envCfg).length > 0) {
+                core.info(`deploy.yaml: loaded config for environment '${env}'`);
+            }
+            return envCfg;
+        }
+        catch (e) {
+            core.warning(`deploy.yaml parse error — falling back to action.yaml / env vars: ${e}`);
+            return {};
+        }
+    }
+    /**
+     * Validates that the deploy role ARN belongs to the expected AWS account for
+     * the target environment. Throws if a cross-account mismatch is detected.
+     * For same-account environments (uat/prod both in management) the check is
+     * account-level only — the deploy.yaml mapping is the primary safeguard.
+     */
+    validateRole(roleArn, env) {
+        const expectedAccount = EXPECTED_ACCOUNT[env];
+        if (expectedAccount && !roleArn.includes(`:${expectedAccount}:`)) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `Security violation: ECS deploy role for environment '${env}' must belong ` +
+                `to AWS account ${expectedAccount}. Got: ${roleArn}. ` +
+                `Check deploy.yaml — the role is read from environments.${env}.deploy_role.`);
+        }
+    }
     async assumeRole(roleArn, sessionName) {
         let json = '';
         await exec.exec('aws', [
@@ -142056,6 +142110,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -152382,6 +152454,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155597,132 +155795,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155793,24 +155865,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
