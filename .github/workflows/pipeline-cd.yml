@@ -294,6 +294,81 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
 
+  # ── ECS Deploy UAT (release/* only, runs after qa deploy + release succeed) ─────
+  # DEPLOY_TARGET=uat tells the lib to promote sha→:uat and deploy to UAT cluster/role.
+  # GitHub environment: uat provides the approval gate + ECS_DEPLOY_ROLE secret.
+
+  ecs_deploy_uat:
+    name: ECS Deploy (uat)
+    needs: [config, ecs_deploy, release]
+    if: |
+      always() &&
+      needs.config.outputs.ecs_deploy_enabled == 'true' &&
+      needs.config.outputs.deploy_environment == 'qa' &&
+      needs.ecs_deploy.result == 'success' &&
+      needs.release.result == 'success'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 60
+    environment: uat
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
+      - name: Setup AWS credentials
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-ecs-deploy-uat
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: ecs_deploy
+        env:
+          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          DEPLOY_TARGET: uat
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
+          ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
+          SHA_TAG: ${{ inputs.sha_tag }}
+
+  release_uat:
+    name: Release (uat)
+    needs: [config, ecs_deploy_uat]
+    if: |
+      always() &&
+      needs.config.outputs.release_enabled == 'true' &&
+      needs.ecs_deploy_uat.result == 'success'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
+      - name: Setup AWS credentials
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-release-uat
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: release
+        env:
+          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          DEPLOY_TARGET: uat
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA_TAG: ${{ inputs.sha_tag }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
+
   post_deploy:
     name: Post Deploy
     needs: [config, deploy, ecs_deploy, release]
