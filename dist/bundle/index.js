@@ -2583,6 +2583,9 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     async onMaster(stage) {
         await this.deploy(stage, Environment_1.Environment.PROD);
     }
+    async onHotfix(stage) {
+        await this.deploy(stage, Environment_1.Environment.PROD);
+    }
     async onDefault(_stage) {
         core.info(`ECSDeployStage: no deploy action for branch '${this.branchType}'`);
     }
@@ -3319,6 +3322,13 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     async onMaster(stage) {
         core.info('AppRelease: promoting image to prod');
         await this.promoteImage(stage, Environment_1.Environment.PROD);
+        await this.tagStable(stage);
+        await this.createGitTag();
+    }
+    async onHotfix(stage) {
+        core.info('AppRelease: promoting hotfix image to prod');
+        await this.promoteImage(stage, Environment_1.Environment.PROD);
+        await this.tagStable(stage);
         await this.createGitTag();
     }
     async onDevelop(stage) {
@@ -3339,14 +3349,23 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         core.info(`AppRelease: no release action for branch '${this.branchType}'`);
     }
     /**
-     * Promotes the immutable sha tag to an environment mutable tag.
+     * Tags the current prod image with a permanent stable-sha-xxx tag.
+     * Unlike :prod (mutable, kept last 5), stable-sha-xxx is never overwritten
+     * and has no lifecycle rule — it provides a permanent audit trail of every
+     * image that reached production.
      *
-     * Source:  ecr/myapp:sha-4f9c21a   (built on feature/hotfix branch)
-     * Dest:    ecr/myapp:dev | qa | prod
-     *
-     * Uses ECR put-image (no layer transfer). All env tags always point to
-     * the same digest — same artefact across every environment.
+     *   prod release N:   :prod + stable-sha-4f9c21a
+     *   prod release N+1: :prod (updated) + stable-sha-4f9c21a + stable-sha-7b3e9c0
      */
+    async tagStable(stage) {
+        if (!stage.publish?.docker)
+            return;
+        const docker = stage.publish.docker;
+        const shaTag = process.env.SHA_TAG ?? `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`;
+        const stableTag = `stable-${shaTag}`;
+        await this.archive.moveAndPublish({ ...docker, tag: shaTag }, { ...docker, tag: stableTag });
+        core.info(`Tagged ${docker.image}:${stableTag} — permanent prod release marker`);
+    }
     async promoteImage(stage, env) {
         if (!stage.publish?.docker) {
             core.warning('No publish.docker config — skipping image promotion');
@@ -3588,10 +3607,23 @@ class PublishStage extends AbstractStage_1.AbstractStage {
                 await this.execCommands(stage.commands, this._effectiveTools(stage));
             }
             const localImage = `${this.config.metadata.artifactId}:${shaTag}`;
-            // Push sha tag — the canonical immutable reference
+            // Push sha tag — the canonical immutable reference used by the CD release stage
             await this.archive.packageAndUpload(localImage, { registry, image, tag: shaTag });
             // Push version tag pointing to same digest (put-image for ECR, retag for GHCR)
             await this.archive.moveAndPublish({ registry, image, tag: shaTag }, { registry, image, tag: versionTag });
+            // Push a branch-labeled snapshot tag for visual identification in the ECR console
+            // and for lifecycle targeting. feature-sha-xxx / hotfix-sha-xxx tags expire after
+            // snapshot_expiry_days if the image is never promoted — the base sha-xxx tag is
+            // what the CD promotion uses (unchanged).
+            const refName = process.env.GITHUB_REF_NAME ?? '';
+            const snapshotPrefix = refName.startsWith('feature/') ? 'feature'
+                : refName.startsWith('hotfix/') ? 'hotfix'
+                    : null;
+            if (snapshotPrefix) {
+                const snapshotTag = `${snapshotPrefix}-${shaTag}`;
+                await this.archive.moveAndPublish({ registry, image, tag: shaTag }, { registry, image, tag: snapshotTag });
+                core.info(`Tagged ${image}:${snapshotTag} — snapshot tag for lifecycle tracking`);
+            }
             const imageRef = this.buildImageRef(registry, image, shaTag);
             StageMessage_1.StageMessage.emit(StageMessage_1.StageOutputKey.IMAGE_TAG, shaTag);
             StageMessage_1.StageMessage.emit(StageMessage_1.StageOutputKey.IMAGE_VERSION, versionTag);
@@ -7374,6 +7406,16 @@ const PROMOTE_STAGES = [
     { name: StageName_1.StageName.RELEASE, required: false },
     { name: StageName_1.StageName.ECS_DEPLOY, required: false },
 ];
+// Hotfix needs BUILD_STAGES for CI (build + publish sha-xxx) and PROMOTE_STAGES for CD
+// (promote sha-xxx → :prod + deploy). The PIPELINE_PHASE filter splits them:
+//   phase=ci → HOTFIX_STAGES − CI_DENY = BUILD_STAGES
+//   phase=cd → HOTFIX_STAGES ∩ CD_ALLOW = {release, ecs_deploy}
+// Hotfix merges directly to main (skips develop) — deploys to prod with approval gate.
+const HOTFIX_STAGES = [
+    ...BUILD_STAGES,
+    { name: StageName_1.StageName.RELEASE, required: false },
+    { name: StageName_1.StageName.ECS_DEPLOY, required: false },
+];
 class AppWorkflow extends Workflow_1.Workflow {
     /**
      * "gitflow" (default) or "trunk" — read from BRANCHING_STRATEGY env var.
@@ -7394,11 +7436,12 @@ class AppWorkflow extends Workflow_1.Workflow {
     gitflowStages(branchType) {
         switch (branchType) {
             case BranchType_1.BranchType.FEATURE:
+                // Build only — push sha-xxx to ECR. Promotion to :dev happens on merge to develop.
+                return BUILD_STAGES;
             case BranchType_1.BranchType.HOTFIX:
             case BranchType_1.BranchType.HOTFIX_EMERGENCY:
-                // Build only — push sha-xxx to ECR. Promotion to :dev happens on merge to develop.
-                // Hotfix merges directly to main — promotion to :prod happens there.
-                return BUILD_STAGES;
+                // Build (CI) + promote to prod (CD). Merges directly to main, bypasses develop.
+                return HOTFIX_STAGES;
             case BranchType_1.BranchType.PULL_REQUEST:
                 // Trivy image scan gates the merge — no build, no promote.
                 return [{ name: StageName_1.StageName.TRIVY, required: false }];
