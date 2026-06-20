@@ -2583,6 +2583,11 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     async onMaster(stage) {
         await this.deploy(stage, Environment_1.Environment.PROD);
     }
+    async onFeature(stage) {
+        // Deploy the built sha-xxx image to dev WITHOUT promoting :dev tag in ECR.
+        // :dev is only updated when feature merges to develop (onDevelop promotes sha→:dev).
+        await this.deploy(stage, Environment_1.Environment.DEV);
+    }
     async onHotfix(stage) {
         await this.deploy(stage, Environment_1.Environment.PROD);
     }
@@ -7406,6 +7411,13 @@ const PROMOTE_STAGES = [
     { name: StageName_1.StageName.RELEASE, required: false },
     { name: StageName_1.StageName.ECS_DEPLOY, required: false },
 ];
+// Feature branches: build (CI) + deploy to dev with sha tag (CD) — no ECR :dev promotion.
+// The :dev tag is only updated on merge to develop (onDevelop promotes sha→:dev).
+// CI phase filter strips ecs_deploy; CD phase filter keeps only ecs_deploy.
+const FEATURE_STAGES = [
+    ...BUILD_STAGES,
+    { name: StageName_1.StageName.ECS_DEPLOY, required: false },
+];
 // Hotfix needs BUILD_STAGES for CI (build + publish sha-xxx) and PROMOTE_STAGES for CD
 // (promote sha-xxx → :prod + deploy). The PIPELINE_PHASE filter splits them:
 //   phase=ci → HOTFIX_STAGES − CI_DENY = BUILD_STAGES
@@ -7436,8 +7448,9 @@ class AppWorkflow extends Workflow_1.Workflow {
     gitflowStages(branchType) {
         switch (branchType) {
             case BranchType_1.BranchType.FEATURE:
-                // Build only — push sha-xxx to ECR. Promotion to :dev happens on merge to develop.
-                return BUILD_STAGES;
+                // Build (CI) + deploy to dev with sha tag (CD). No ECR :dev promotion —
+                // :dev is only updated on merge to develop.
+                return FEATURE_STAGES;
             case BranchType_1.BranchType.HOTFIX:
             case BranchType_1.BranchType.HOTFIX_EMERGENCY:
                 // Build (CI) + promote to prod (CD). Merges directly to main, bypasses develop.
