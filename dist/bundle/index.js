@@ -2583,12 +2583,6 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     async onMaster(stage) {
         await this.deploy(stage, Environment_1.Environment.PROD);
     }
-    async onFeature(stage) {
-        await this.deploy(stage, Environment_1.Environment.DEV);
-    }
-    async onHotfix(stage) {
-        await this.deploy(stage, Environment_1.Environment.DEV);
-    }
     async onDefault(_stage) {
         core.info(`ECSDeployStage: no deploy action for branch '${this.branchType}'`);
     }
@@ -3340,14 +3334,6 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     }
     async onPullRequest(_stage) {
         core.info('AppRelease: PR is a Trivy gate only — promotion happens after merge');
-    }
-    async onFeature(stage) {
-        core.info('AppRelease: promoting feature image to dev (build-once model)');
-        await this.promoteImage(stage, Environment_1.Environment.DEV);
-    }
-    async onHotfix(stage) {
-        core.info('AppRelease: promoting hotfix image to dev (build-once model)');
-        await this.promoteImage(stage, Environment_1.Environment.DEV);
     }
     async onDefault(_stage) {
         core.info(`AppRelease: no release action for branch '${this.branchType}'`);
@@ -5231,11 +5217,11 @@ class OutputWriter {
                 allowedSlots = new Set([...allowedSlots].filter(s => CD_ALLOW.has(s)));
             }
             else {
-                // Deployable branches (feature/hotfix/develop/release/master): enable every
-                // declared CD stage regardless of the gitflow build/promote split, so a
-                // feature branch can auto-deploy to dev. The prod guard in ECSDeployStage
-                // still blocks env=prod from any branch other than master/main.
-                allowedSlots = new Set(CD_ALLOW);
+                // Intersect branch slots with CD_ALLOW — only stages that are both declared
+                // for this branch type AND are deploy/promote stages are enabled.
+                // feature/hotfix slots = BUILD_STAGES (no release/ecs_deploy) → nothing deploys.
+                // develop/release/master slots = PROMOTE_STAGES → release + ecs_deploy enabled.
+                allowedSlots = new Set([...allowedSlots].filter(s => CD_ALLOW.has(s)));
             }
         }
         if (phase)
@@ -7388,13 +7374,6 @@ const PROMOTE_STAGES = [
     { name: StageName_1.StageName.RELEASE, required: false },
     { name: StageName_1.StageName.ECS_DEPLOY, required: false },
 ];
-// Build once, deploy to dev: feature/* builds the image AND promotes sha→:dev + deploys.
-// Same image is later re-promoted (no rebuild) to :qa/:uat/:prod on release/main.
-const FEATURE_STAGES = [
-    ...BUILD_STAGES,
-    { name: StageName_1.StageName.RELEASE, required: false },
-    { name: StageName_1.StageName.ECS_DEPLOY, required: false },
-];
 class AppWorkflow extends Workflow_1.Workflow {
     /**
      * "gitflow" (default) or "trunk" — read from BRANCHING_STRATEGY env var.
@@ -7417,9 +7396,9 @@ class AppWorkflow extends Workflow_1.Workflow {
             case BranchType_1.BranchType.FEATURE:
             case BranchType_1.BranchType.HOTFIX:
             case BranchType_1.BranchType.HOTFIX_EMERGENCY:
-                // Build once here, promote sha→:dev and deploy to dev immediately.
-                // release/* and main re-promote the same image (no rebuild) to :qa/:uat/:prod.
-                return FEATURE_STAGES;
+                // Build only — push sha-xxx to ECR. Promotion to :dev happens on merge to develop.
+                // Hotfix merges directly to main — promotion to :prod happens there.
+                return BUILD_STAGES;
             case BranchType_1.BranchType.PULL_REQUEST:
                 // Trivy image scan gates the merge — no build, no promote.
                 return [{ name: StageName_1.StageName.TRIVY, required: false }];
