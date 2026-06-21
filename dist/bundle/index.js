@@ -2901,6 +2901,7 @@ const PlanExtractor_1 = __nccwpck_require__(56078);
 const StageTransfer_1 = __nccwpck_require__(24734);
 const PlanSummary_1 = __nccwpck_require__(60566);
 const PlanSecurity_1 = __nccwpck_require__(87142);
+const TerraformStateCollector_1 = __nccwpck_require__(18159);
 const SopsLoader_1 = __nccwpck_require__(57987);
 const BranchDetector_1 = __nccwpck_require__(90609);
 // Subcommands that are never allowed inside a plan stage.
@@ -3029,6 +3030,152 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
         // ── Phase 4: write resource change summary to GitHub Job Summary ───────────
         // Module paths are passed so each plan heading shows its source directory.
         await PlanSummary_1.PlanSummary.writeSummaryForPlans(perAccountPlans, modulePathsMap);
+        // ── Phase 5: tfcost — cost estimate appended after resource summary ────────
+        // tfcost is a free, open-source CLI that estimates AWS costs from plan JSON.
+        // No API key or registration required.
+        // Ref: https://github.com/eco-ci/tfcost
+        await this.runTfcost(perAccountPlans);
+    }
+    // ── Cost report builder ───────────────────────────────────────────────────
+    // Parses oiq JSON output and generates a markdown report.
+    // Filters out usage-based resources (S3, CloudWatch) whose estimates rely on
+    // unreliable default assumptions — these show wildly inflated costs for empty
+    // buckets/log groups. Only hourly-priced resources (EC2, RDS, NAT GW, etc.)
+    // have reliable estimates from static analysis.
+    buildCostReport(jsonOut, count, unit) {
+        const USAGE_BASED_TYPES = [
+            'aws_s3_bucket',
+            'aws_cloudwatch_log_group',
+            'aws_cloudwatch_log_stream',
+            'aws_s3_object',
+        ];
+        if (!jsonOut.trim()) {
+            return ['> No priceable resources found (IAM, SCPs, Organizations, SSO have no hourly cost).'];
+        }
+        try {
+            const report = JSON.parse(jsonOut.trim());
+            const added = (report.added ?? []).filter((r) => !USAGE_BASED_TYPES.some(t => r.resource?.includes(t)));
+            const removed = (report.removed ?? []).filter((r) => !USAGE_BASED_TYPES.some(t => r.resource?.includes(t)));
+            const unchanged = (report.unchanged ?? []).filter((r) => !USAGE_BASED_TYPES.some(t => r.resource?.includes(t)));
+            const fmt = (n) => `$${n.toFixed(2)}`;
+            const addedTotal = added.reduce((s, r) => s + (r.monthly_cost ?? 0), 0);
+            const removedTotal = removed.reduce((s, r) => s + (r.monthly_cost ?? 0), 0);
+            const lines = [];
+            if (added.length === 0 && removed.length === 0 && unchanged.length === 0) {
+                lines.push('> No hourly-priced resources found. S3/CloudWatch excluded (usage-based pricing).');
+                lines.push(`> From ${count} ${unit}(s)`);
+                return lines;
+            }
+            lines.push('```');
+            if (added.length > 0) {
+                lines.push(`🟢 Added: ${fmt(addedTotal)}/mo`);
+                for (const r of added)
+                    lines.push(`  + ${r.resource.padEnd(55)} ${fmt(r.monthly_cost ?? 0)}/mo`);
+            }
+            if (removed.length > 0) {
+                lines.push(`🔴 Removed: ${fmt(removedTotal)}/mo`);
+                for (const r of removed)
+                    lines.push(`  - ${r.resource.padEnd(55)} ${fmt(r.monthly_cost ?? 0)}/mo`);
+            }
+            if (unchanged.length > 0) {
+                const unchangedTotal = unchanged.reduce((s, r) => s + (r.monthly_cost ?? 0), 0);
+                lines.push(`⚪ Existing: ${fmt(unchangedTotal)}/mo`);
+                for (const r of unchanged)
+                    lines.push(`    ${r.resource.padEnd(55)} ${fmt(r.monthly_cost ?? 0)}/mo`);
+            }
+            const netDiff = addedTotal - removedTotal;
+            if (netDiff !== 0)
+                lines.push(`Net change: ${netDiff >= 0 ? '+' : ''}${fmt(netDiff)}/mo`);
+            lines.push('```');
+            lines.push(`> From ${count} ${unit}(s) · S3/CloudWatch excluded (usage-based, unreliable without real data)`);
+            return lines;
+        }
+        catch {
+            // JSON parse failed — fall back to raw text
+            return ['```', jsonOut.trim().split('\n').slice(0, 20).join('\n'), '```',
+                `> From ${count} ${unit}(s)`];
+        }
+    }
+    // ── Cost estimation via OpenInfraQuote ────────────────────────────────────
+    // Estimates cost from:
+    //   1. Plan files  → resources about to be created/changed
+    //   2. State files → resources already deployed (current infra cost)
+    // Ref: https://github.com/terrateamio/openinfraquote
+    async runTfcost(planFiles) {
+        if (planFiles.length === 0)
+            return;
+        if ((process.env.TF_COST_REPORT ?? 'true').toLowerCase() === 'false') {
+            core.info('[openinfraquote] skipped (TF_COST_REPORT=false)');
+            return;
+        }
+        try {
+            // ── Install OpenInfraQuote binary ─────────────────────────────────────
+            // Use GITHUB_TOKEN to avoid API rate limits in CI (60 req/hr unauth vs 5000 auth)
+            core.info('[openinfraquote] fetching latest release...');
+            const token = process.env.GITHUB_TOKEN ?? '';
+            const authHeader = token ? `-H "Authorization: Bearer ${token}"` : '';
+            const { stdout: latestJson } = await exec.getExecOutput('bash', ['-c',
+                `curl -sSfL ${authHeader} https://api.github.com/repos/terrateamio/openinfraquote/releases/latest`,
+            ], { silent: true });
+            const release = JSON.parse(latestJson);
+            if (!release.assets?.length) {
+                throw new Error(`GitHub API returned no assets — possible rate limit. Response: ${latestJson.slice(0, 200)}`);
+            }
+            const asset = release.assets.find(a => a.name.includes('linux') && a.name.includes('amd64'));
+            if (!asset)
+                throw new Error('openinfraquote linux/amd64 asset not found in latest release');
+            core.info(`[openinfraquote] installing ${release.tag_name ?? 'latest'}...`);
+            await exec.exec('bash', ['-c',
+                `curl -sSfL "${asset.browser_download_url}" | tar -xz -C /usr/local/bin && chmod +x /usr/local/bin/oiq`,
+            ]);
+            // ── Download pricing sheet ────────────────────────────────────────────
+            core.info('[openinfraquote] downloading price sheet...');
+            await exec.exec('bash', ['-c',
+                'curl -sSfL https://oiq.terrateam.io/prices.csv.gz | gunzip > /tmp/oiq-prices.csv',
+            ]);
+            // Detect region from env or default to us-east-2
+            const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
+            const lines = ['## 💰 Cost Estimate (OpenInfraQuote)', ''];
+            // ── Part 1: pending plan changes ──────────────────────────────────────
+            const planFileArgs = planFiles.map(f => `"${f}"`).join(' ');
+            const { stdout: planJson } = await exec.getExecOutput('bash', ['-c',
+                `oiq match --pricesheet /tmp/oiq-prices.csv ${planFileArgs} | oiq price --region ${region} --format=json`
+            ], { ignoreReturnCode: true, silent: true });
+            lines.push('### 🔄 Pending Changes');
+            lines.push(...this.buildCostReport(planJson, planFiles.length, 'plan file'));
+            // ── Part 2: current deployed state ───────────────────────────────────
+            core.info('[openinfraquote] pulling module states for current infra cost...');
+            const stateFiles = await TerraformStateCollector_1.TerraformStateCollector.collect();
+            if (stateFiles.length > 0) {
+                const stateFileArgs = stateFiles.map(s => `"${s.filePath}"`).join(' ');
+                const { stdout: stateJson } = await exec.getExecOutput('bash', ['-c',
+                    `oiq match --pricesheet /tmp/oiq-prices.csv ${stateFileArgs} | oiq price --region ${region} --format=json`
+                ], { ignoreReturnCode: true, silent: true });
+                lines.push('');
+                lines.push('### 🏗️ Current Deployed Infrastructure');
+                lines.push(...this.buildCostReport(stateJson, stateFiles.length, 'module state'));
+                lines.push(`> Modules: ${stateFiles.map(s => s.modulePath.split('/').slice(-2).join('/')).join(', ')}`);
+            }
+            else {
+                core.info('[openinfraquote] no module states found — skipping current infra cost');
+            }
+            lines.push('');
+            lines.push(`> Powered by [OpenInfraQuote](https://github.com/terrateamio/openinfraquote) — region: \`${region}\``);
+            // Write to Job Summary using core.summary (consistent with other summaries)
+            core.summary.addRaw(lines.join('\n') + '\n\n---\n\n');
+            await core.summary.write();
+            core.info('[openinfraquote] cost estimate written to Job Summary');
+        }
+        catch (err) {
+            // Non-fatal — cost estimate is best-effort, never blocks the pipeline
+            core.warning(`[openinfraquote] skipped: ${err.message}`);
+            // Write a visible notice in the summary so users know why costs are missing
+            try {
+                core.summary.addRaw(`## 💰 Cost Estimate\n> ⚠️ Skipped: ${err.message}\n\n---\n\n`);
+                await core.summary.write();
+            }
+            catch { /* ignore summary write errors */ }
+        }
     }
 }
 exports.PlanStage = PlanStage;
@@ -6637,6 +6784,202 @@ class SummaryWriter {
 }
 exports.SummaryWriter = SummaryWriter;
 //# sourceMappingURL=SummaryWriter.js.map
+
+/***/ }),
+
+/***/ 18159:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TerraformStateCollector = void 0;
+const exec = __importStar(__nccwpck_require__(95236));
+const fs = __importStar(__nccwpck_require__(79896));
+const path = __importStar(__nccwpck_require__(16928));
+const Logger_1 = __nccwpck_require__(26747);
+/**
+ * Discovers all Terragrunt modules in a working directory and pulls
+ * their Terraform state as JSON (via `terraform show -json`), writing
+ * each to a temp file.
+ *
+ * Works regardless of how modules are nested — uses `terragrunt find`
+ * (v1.0) to enumerate all units, then runs `terraform show -json` in
+ * each module's Terragrunt cache directory.
+ *
+ * Usage:
+ *   const files = await TerraformStateCollector.collect('live/dev');
+ *   // files[i].filePath → /tmp/state-0.json, /tmp/state-1.json, …
+ */
+class TerraformStateCollector {
+    /**
+     * Discovers all modules under workingDir, pulls each state and writes
+     * it to a temp JSON file.  Returns only the files that had state
+     * (empty/unapplied modules are silently skipped).
+     */
+    static async collect(workingDir) {
+        const modules = await this.discoverModules(workingDir);
+        if (modules.length === 0) {
+            Logger_1.Logger.warn('[StateCollector] no modules found — skipping state collection');
+            return [];
+        }
+        const CONCURRENCY = 4;
+        Logger_1.Logger.info(`[StateCollector] found ${modules.length} module(s), pulling state (concurrency=${CONCURRENCY})…`);
+        const results = [];
+        for (let i = 0; i < modules.length; i += CONCURRENCY) {
+            const batch = modules.slice(i, i + CONCURRENCY);
+            const settled = await Promise.allSettled(batch.map(async (modulePath, idx) => {
+                const outFile = `/tmp/tg-state-${i + idx}.json`;
+                const ok = await this.pullModuleState(modulePath, outFile);
+                if (ok) {
+                    Logger_1.Logger.info(`[StateCollector] state pulled → ${path.basename(modulePath)} → ${outFile}`);
+                    return { modulePath, filePath: outFile };
+                }
+                return null;
+            }));
+            for (const r of settled) {
+                if (r.status === 'fulfilled' && r.value !== null)
+                    results.push(r.value);
+            }
+        }
+        Logger_1.Logger.info(`[StateCollector] ${results.length}/${modules.length} modules have state`);
+        return results;
+    }
+    // ── Private helpers ────────────────────────────────────────────────────────
+    /**
+     * Uses `terragrunt find --json` (v1.0) to enumerate all unit paths.
+     * Falls back to directory discovery if find is unavailable.
+     */
+    static async discoverModules(workingDir) {
+        let stdout = '';
+        const opts = {
+            ignoreReturnCode: true,
+            silent: true,
+            listeners: { stdout: (d) => { stdout += d.toString(); } },
+        };
+        if (workingDir)
+            opts.cwd = workingDir;
+        // v1.0: terragrunt find --json lists all units with their paths
+        await exec.exec('bash', ['-c', 'terragrunt find --json 2>/dev/null'], opts);
+        if (stdout.trim()) {
+            try {
+                // Output format: [{ "path": "...", ... }, ...]
+                const units = JSON.parse(stdout.trim());
+                const cwd = workingDir ? path.resolve(workingDir) : process.cwd();
+                return units
+                    .map(u => u.path ?? u.dir ?? '')
+                    .filter(Boolean)
+                    .map(p => path.isAbsolute(p) ? p : path.join(cwd, p));
+            }
+            catch {
+                Logger_1.Logger.warn('[StateCollector] could not parse terragrunt find --json output');
+            }
+        }
+        // Fallback: scan for terragrunt.hcl files
+        return this.scanForModules(workingDir ?? '.');
+    }
+    /**
+     * Fallback: recursively find directories containing terragrunt.hcl
+     * (excluding .terragrunt-cache and hidden directories).
+     */
+    static scanForModules(rootDir) {
+        const results = [];
+        const scan = (dir) => {
+            let entries;
+            try {
+                entries = fs.readdirSync(dir, { withFileTypes: true });
+            }
+            catch {
+                return;
+            }
+            const hasHcl = entries.some(e => e.isFile() && e.name === 'terragrunt.hcl');
+            if (hasHcl)
+                results.push(dir);
+            for (const e of entries) {
+                if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
+                    scan(path.join(dir, e.name));
+                }
+            }
+        };
+        scan(path.resolve(rootDir));
+        return results;
+    }
+    /**
+     * Runs `terragrunt show -json` (or `terraform show -json`) inside
+     * a module directory to extract its current state as JSON.
+     * Returns true if state was pulled and written successfully.
+     */
+    static async pullModuleState(modulePath, outFile) {
+        let stdout = '';
+        const opts = {
+            cwd: modulePath,
+            ignoreReturnCode: true,
+            silent: true,
+            env: { ...process.env, TF_INPUT: '0', TF_IN_AUTOMATION: '1' },
+            listeners: {
+                stdout: (d) => { stdout += d.toString(); },
+            },
+        };
+        // Try `terragrunt show -json` first (reads from Terragrunt cache),
+        // then fall back to plain `terraform show -json` for raw TF dirs.
+        // </dev/null + --non-interactive + TF_INPUT=0 prevent an implicit
+        // `init` (for not-yet-initialized modules) from hanging forever on
+        // a stdin prompt with stderr silenced.
+        await exec.exec('bash', ['-c',
+            'terragrunt --non-interactive show -json </dev/null 2>/dev/null || terraform show -json </dev/null 2>/dev/null'
+        ], opts);
+        const json = stdout.trim();
+        if (!json || !json.startsWith('{'))
+            return false;
+        // Check that the state actually has resources (not empty state)
+        try {
+            const parsed = JSON.parse(json);
+            const resources = parsed?.values?.root_module?.resources ?? [];
+            if (resources.length === 0)
+                return false;
+        }
+        catch {
+            return false;
+        }
+        fs.writeFileSync(outFile, json, 'utf8');
+        return true;
+    }
+}
+exports.TerraformStateCollector = TerraformStateCollector;
+//# sourceMappingURL=TerraformStateCollector.js.map
 
 /***/ }),
 
@@ -141823,6 +142166,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -152149,6 +152510,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155364,132 +155851,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155560,24 +155921,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
