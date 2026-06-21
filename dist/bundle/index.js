@@ -3104,8 +3104,8 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
     async runTfcost(planFiles) {
         if (planFiles.length === 0)
             return;
-        if ((process.env.TF_COST_REPORT ?? 'true').toLowerCase() === 'false') {
-            core.info('[openinfraquote] skipped (TF_COST_REPORT=false)');
+        if ((process.env.TF_COST_REPORT ?? 'false').toLowerCase() !== 'true') {
+            core.info('[openinfraquote] skipped (set TF_COST_REPORT=true to enable)');
             return;
         }
         try {
