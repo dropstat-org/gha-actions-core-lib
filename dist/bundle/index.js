@@ -5290,14 +5290,14 @@ class OutputWriter {
         const deployStage = config.stages.find(s => s.name === StageName_1.StageName.DEPLOY || s.name === StageName_1.StageName.ECS_DEPLOY);
         // In CD phase the GitHub `environment:` gate (approval + scoped ECS_DEPLOY_ROLE secret)
         // must match the real deploy target, which the lib routes by branch
-        // (develop→dev, release/*→uat, master/main→prod). Outside CD, keep the static
+        // (develop→dev, release/*→qa, master/main→prod). Outside CD, keep the static
         // action.yaml value so legacy single-workflow repos are unaffected.
         const branchEnv = {
             [BranchType_1.BranchType.FEATURE]: 'dev',
             [BranchType_1.BranchType.HOTFIX]: 'dev',
             [BranchType_1.BranchType.HOTFIX_EMERGENCY]: 'dev',
             [BranchType_1.BranchType.DEVELOP]: 'dev',
-            [BranchType_1.BranchType.RELEASE]: 'uat',
+            [BranchType_1.BranchType.RELEASE]: 'qa',
             [BranchType_1.BranchType.MASTER]: 'prod',
         };
         const deployEnvironment = (phase === 'cd' && deployStage)
