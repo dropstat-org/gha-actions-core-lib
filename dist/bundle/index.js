@@ -779,6 +779,7 @@ var ErrorCode;
     // Artifact / publish
     ErrorCode["MISSING_IMAGE_REF"] = "MISSING_IMAGE_REF";
     ErrorCode["MISSING_REGISTRY_CONFIG"] = "MISSING_REGISTRY_CONFIG";
+    ErrorCode["ECR_IMAGE_NOT_FOUND"] = "ECR_IMAGE_NOT_FOUND";
     // Hotfix emergency
     ErrorCode["HOTFIX_EXCEPTION_NOT_ALLOWED"] = "HOTFIX_EXCEPTION_NOT_ALLOWED";
     // Analyzer
@@ -2706,6 +2707,14 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             delete stripped[key];
         }
         const newTaskDef = stripped;
+        // ── 2.5. Verify image exists in ECR before touching task definition ─────────
+        // Guards against updating the task definition to a tag that was never promoted
+        // (e.g. AppRelease failed but ECSDeployStage still runs due to incorrect job
+        // ordering in the caller). Failing here leaves the existing task definition
+        // untouched and avoids a crash-loop on the next deploy.
+        if (fullImage) {
+            await this.verifyEcrImage(fullImage, region);
+        }
         // ── 3. Register new task definition revision ──────────────────────────────
         let newArn = '';
         await exec.exec('aws', [
@@ -2782,6 +2791,40 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 `to AWS account ${expectedAccount}. Got: ${roleArn}. ` +
                 `Check deploy.yaml — the role is read from environments.${env}.deploy_role.`);
         }
+    }
+    /**
+     * Verifies that the ECR image tag exists before registering a new task definition.
+     * Parses the full image URI (registry/repo:tag) and calls ecr:batch-get-image.
+     * Throws ECR_IMAGE_NOT_FOUND if the tag is absent, leaving the task definition untouched.
+     * No-op for non-ECR images (no ".ecr." in the URI).
+     */
+    async verifyEcrImage(fullImage, region) {
+        if (!fullImage.includes('.ecr.'))
+            return;
+        const colonIdx = fullImage.lastIndexOf(':');
+        const imageWithoutTag = fullImage.slice(0, colonIdx);
+        const tag = fullImage.slice(colonIdx + 1);
+        const slashIdx = imageWithoutTag.indexOf('/');
+        const registryHost = imageWithoutTag.slice(0, slashIdx);
+        const repoName = imageWithoutTag.slice(slashIdx + 1);
+        const registryId = registryHost.split('.')[0];
+        core.info(`   Verifying ECR image exists: ${repoName}:${tag} (registry ${registryId})`);
+        let response = '';
+        await exec.exec('aws', [
+            'ecr', 'batch-get-image',
+            '--registry-id', registryId,
+            '--repository-name', repoName,
+            '--image-ids', `imageTag=${tag}`,
+            '--query', 'images[0].imageId.imageTag',
+            '--region', region,
+            '--output', 'text',
+        ], { listeners: { stdout: (d) => { response += d.toString(); } } });
+        if (!response.trim() || response.trim() === 'None') {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.ECR_IMAGE_NOT_FOUND, `ECR image not found: ${fullImage}\n` +
+                `The tag ':${tag}' does not exist in repository '${repoName}'.\n` +
+                `Ensure the AppRelease stage completed successfully before ECSDeployStage runs.`);
+        }
+        core.info(`   ECR image verified: ${repoName}:${tag} exists`);
     }
     async assumeRole(roleArn, sessionName) {
         let json = '';
