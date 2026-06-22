@@ -253,6 +253,11 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: plan
+        env:
+          # GitHub provider token for terraform repos that manage GitHub resources
+          # (e.g. github-org). Admin token when present, else the default token
+          # (harmless for AWS-only terraform repos).
+          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
 
   checkov_tf:
     name: Checkov Terraform
@@ -303,6 +308,9 @@ jobs:
         with:
           stage: deploy
         env:
+          # GitHub provider token for terraform repos that manage GitHub resources
+          # (e.g. github-org). Admin token when present, else the default token.
+          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
