@@ -76,6 +76,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - id: cfg
         uses: dropstat-org/gha-actions-core-lib@main
         with:
@@ -96,6 +100,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
@@ -119,6 +127,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: checkov_tf
@@ -136,6 +148,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: pre_deploy
@@ -192,6 +208,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       # Always assume AWS_ROLE_ARN: terraform deploys AND app deploys (e.g. static
       # frontends doing `aws s3 sync` + CloudFront invalidation) both need creds.
       # setup-terraform also installs TF/TG (harmless for app deploys).
@@ -230,6 +250,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - name: Setup AWS credentials
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
@@ -276,6 +300,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - name: Setup AWS credentials
         # Terraform release only creates a git tag — no ECR/AWS needed.
         if: needs.config.outputs.ActionsCoreLib_type != 'terraform'
@@ -320,6 +348,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - name: Setup AWS credentials
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
@@ -355,6 +387,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - name: Setup AWS credentials
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
@@ -387,6 +423,10 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.deploy_ref }}
+          # depth 2 exposes a merge commit's parents so the library can resolve the
+          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
+          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
+          fetch-depth: 2
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: post_deploy
