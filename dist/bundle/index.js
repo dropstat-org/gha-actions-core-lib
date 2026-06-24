@@ -3390,28 +3390,39 @@ const Environment_1 = __nccwpck_require__(27413);
 const ImageSHA_1 = __nccwpck_require__(2870);
 const GitVersionResolver_1 = __nccwpck_require__(46601);
 class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
+    // Build-once promotion (mirrors the Groovy library's Docker.move: prod←qa, qa←dev).
+    // Each environment promotes the SAME image forward from the prior env tag, so the
+    // promotion never depends on the merge depth (resolving the sha from the merge's
+    // parents only works one level — it breaks at release→master, two levels deep).
+    //   develop → :dev   from sha-<feature>   (1 level: develop merge's 2nd parent)
+    //   release → :qa    from sha-<feature>   (1 level: release HEAD = develop merge)
+    //   release → :uat   from :qa
+    //   master  → :prod  from :qa             (:qa was set by this release's qa pass)
+    //   hotfix  → :prod  from sha-<hotfix>    (hotfix builds its own image, skips qa)
     async onMaster(stage) {
-        core.info('AppRelease: promoting image to prod');
-        await this.promoteImage(stage, Environment_1.Environment.PROD);
+        core.info('AppRelease: promoting image to prod (from :qa)');
+        await this.promoteImage(stage, Environment_1.Environment.PROD, Environment_1.Environment.QA);
         await this.tagStable(stage);
         await this.createGitTag();
     }
     async onHotfix(stage) {
-        core.info('AppRelease: promoting hotfix image to prod');
-        await this.promoteImage(stage, Environment_1.Environment.PROD);
+        core.info('AppRelease: promoting hotfix image to prod (from sha)');
+        await this.promoteImage(stage, Environment_1.Environment.PROD, this.sourceShaTag());
         await this.tagStable(stage);
         await this.createGitTag();
     }
     async onDevelop(stage) {
-        core.info('AppRelease: promoting image to dev');
-        await this.promoteImage(stage, Environment_1.Environment.DEV);
+        core.info('AppRelease: promoting image to dev (from sha)');
+        await this.promoteImage(stage, Environment_1.Environment.DEV, this.sourceShaTag());
     }
     async onRelease(stage) {
         // DEPLOY_TARGET=uat → second pass of release/* pipeline (uat job in pipeline-cd.yml)
         const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
         const env = target === 'uat' ? Environment_1.Environment.UAT : Environment_1.Environment.QA;
-        core.info(`AppRelease: promoting image to ${env}`);
-        await this.promoteImage(stage, env);
+        // qa promotes the freshly-built sha (1 level); uat promotes forward from :qa.
+        const source = target === 'uat' ? Environment_1.Environment.QA : this.sourceShaTag();
+        core.info(`AppRelease: promoting image to ${env} (from ${source})`);
+        await this.promoteImage(stage, env, source);
     }
     async onPullRequest(_stage) {
         core.info('AppRelease: PR is a Trivy gate only — promotion happens after merge');
@@ -3432,26 +3443,38 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         if (!stage.publish?.docker)
             return;
         const docker = stage.publish.docker;
-        const shaTag = (process.env.SHA_TAG?.trim() || `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`);
+        const shaTag = this.sourceShaTag();
         const stableTag = `stable-${shaTag}`;
-        await this.archive.moveAndPublish({ ...docker, tag: shaTag }, { ...docker, tag: stableTag });
+        // Source from :prod (the digest just promoted) so the marker always exists,
+        // regardless of how the prod image was sourced (qa for master, sha for hotfix).
+        await this.archive.moveAndPublish({ ...docker, tag: Environment_1.Environment.PROD }, { ...docker, tag: stableTag });
         core.info(`Tagged ${docker.image}:${stableTag} — permanent prod release marker`);
     }
-    async promoteImage(stage, env) {
+    /**
+     * The immutable sha tag of the image to promote.
+     * SHA_TAG env var overrides (CD repos / workflow_call input sha_tag). Empty
+     * falls back to the resolved commitHash, which is the merge's second parent
+     * (the feature tip that built the image) via resolveImageSHA(). Use || not ??:
+     * an EMPTY SHA_TAG ("" from push-driven CD) must fall back, otherwise the archive
+     * promotes :latest (not found).
+     */
+    sourceShaTag() {
+        return (process.env.SHA_TAG?.trim() || `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`);
+    }
+    /**
+     * Promotes an image to an environment tag (put-image, no rebuild).
+     * `source` is the tag to promote FROM — either an immutable sha tag (dev/qa,
+     * one merge level from the build) or the prior environment tag (uat←qa, prod←qa),
+     * mirroring the Groovy library's prior-env promotion so depth of merge is irrelevant.
+     */
+    async promoteImage(stage, env, source) {
         if (!stage.publish?.docker) {
             core.warning('No publish.docker config — skipping image promotion');
             return;
         }
         const docker = stage.publish.docker;
-        // SHA_TAG env var allows CD repos to override the commitHash-based sha tag.
-        // Set via workflow_call input sha_tag → the lib passes it as SHA_TAG env var.
-        // Use || (not ??): an EMPTY SHA_TAG (push-driven CD passes sha_tag: "") must
-        // fall back to the resolved commitHash, which is the merge's second parent
-        // (the feature tip that built the image) via resolveImageSHA(). With ?? the
-        // empty string short-circuited to "" → archive promoted :latest (not found).
-        const shaTag = (process.env.SHA_TAG?.trim() || `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`);
-        await this.archive.moveAndPublish({ ...docker, tag: shaTag }, { ...docker, tag: env });
-        core.info(`Promoted ${docker.image}:${shaTag} → ${docker.image}:${env}`);
+        await this.archive.moveAndPublish({ ...docker, tag: source }, { ...docker, tag: env });
+        core.info(`Promoted ${docker.image}:${source} → ${docker.image}:${env}`);
     }
     async createGitTag() {
         // version is optional — resolve (explicit → GitVersion → date) so the tag is
@@ -142253,6 +142276,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -152579,6 +152620,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155794,132 +155961,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155990,24 +156031,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
