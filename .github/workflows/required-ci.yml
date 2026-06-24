@@ -1,0 +1,29 @@
+name: Required CI
+
+# Governance gate referenced by the org ruleset "Required CI workflow".
+#
+# GitHub required-workflows run the referenced file as a top-level workflow in
+# each target repo, injecting the events below. The reusable pipeline-ci.yml
+# cannot run standalone (its runs-on reads inputs.runner, which is null outside
+# workflow_call), so this thin wrapper calls it instead.
+#
+# On pull_request the library decides what runs per repo type:
+#   - app  -> no stages (build-once already gated on the feature push) => fast no-op
+#   - tf   -> plan + checks
+# A dev cannot bypass the pipeline by adding their own workflow: this one is
+# injected org-wide by the ruleset and always runs the library's logic.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  id-token:        write
+  contents:        read
+  packages:        read
+  security-events: write
+  actions:         read
+
+jobs:
+  ci:
+    uses: dropstat-org/gha-actions-core-lib/.github/workflows/pipeline-ci.yml@main
+    secrets: inherit
