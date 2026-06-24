@@ -5270,9 +5270,10 @@ class OutputWriter {
     static async writeFlags(config, branchType, workflow) {
         const stageNames = new Set(config.stages.map(s => s.name));
         const slots = workflow.stagesConfig(branchType);
-        // If workflow defines no slots (e.g. GenericWorkflow), all stages declared in
-        // action.yaml are allowed — the workflow imposes no ordering or filtering.
-        const noSlotRestriction = slots.length === 0;
+        // Only GenericWorkflow allows every declared stage. For app/terraform the slot
+        // list is authoritative, so an empty list (e.g. app pull_request) means "no
+        // stages run here" — NOT "run everything".
+        const noSlotRestriction = workflow.imposesNoRestrictions();
         let allowedSlots = new Set(slots.map(s => s.name));
         // Hotfix emergency: validate repo authorization and remove skippable stages
         if (branchType === BranchType_1.BranchType.HOTFIX_EMERGENCY) {
@@ -7521,8 +7522,10 @@ class AppWorkflow extends Workflow_1.Workflow {
                 // Build (CI) + promote to prod (CD). Merges directly to main, bypasses develop.
                 return HOTFIX_STAGES;
             case BranchType_1.BranchType.PULL_REQUEST:
-                // Trivy image scan gates the merge — no build, no promote.
-                return [{ name: StageName_1.StageName.TRIVY, required: false }];
+                // App PRs run nothing: the build + test gate already ran on the feature
+                // push (build-once). The PR only needs review; the required CI workflow
+                // runs the library, which skips every stage here (fast no-op gate).
+                return [];
             case BranchType_1.BranchType.DEVELOP:
             case BranchType_1.BranchType.RELEASE:
             case BranchType_1.BranchType.MASTER:
@@ -7537,7 +7540,8 @@ class AppWorkflow extends Workflow_1.Workflow {
             case BranchType_1.BranchType.FEATURE:
                 return BUILD_STAGES;
             case BranchType_1.BranchType.PULL_REQUEST:
-                return [{ name: StageName_1.StageName.TRIVY, required: false }];
+                // App PRs run nothing (build-once already gated on the feature push).
+                return [];
             case BranchType_1.BranchType.MASTER:
                 // In trunk, main is the single integration point — scan + promote to prod.
                 return [
@@ -7567,6 +7571,10 @@ const Workflow_1 = __nccwpck_require__(2847);
 class GenericWorkflow extends Workflow_1.Workflow {
     stagesConfig(_branchType) {
         return [];
+    }
+    // Generic imposes no restrictions: all declared stages run regardless of branch.
+    imposesNoRestrictions() {
+        return true;
     }
     checkStages() {
         // Generic ActionsCoreLib imposes no stage restrictions
@@ -7675,6 +7683,15 @@ exports.Workflow = void 0;
 const ErrorCode_1 = __nccwpck_require__(9727);
 const ActionYaml_1 = __nccwpck_require__(9192);
 class Workflow {
+    /**
+     * When true, the workflow imposes NO stage restrictions: every stage declared
+     * in action.yaml runs (used by GenericWorkflow). When false (app/terraform),
+     * stagesConfig() is authoritative — an empty slot list for a branch type means
+     * "no stages run here" (e.g. app pull_request), NOT "run everything".
+     */
+    imposesNoRestrictions() {
+        return false;
+    }
     checkStages(stages, branchType) {
         const slots = this.stagesConfig(branchType);
         const stageNames = stages.map(s => s.name);
