@@ -3388,6 +3388,7 @@ const core = __importStar(__nccwpck_require__(37484));
 const AbstractReleaseStage_1 = __nccwpck_require__(10848);
 const Environment_1 = __nccwpck_require__(27413);
 const ImageSHA_1 = __nccwpck_require__(2870);
+const GitVersionResolver_1 = __nccwpck_require__(46601);
 class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     async onMaster(stage) {
         core.info('AppRelease: promoting image to prod');
@@ -3431,7 +3432,7 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         if (!stage.publish?.docker)
             return;
         const docker = stage.publish.docker;
-        const shaTag = process.env.SHA_TAG ?? `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`;
+        const shaTag = (process.env.SHA_TAG?.trim() || `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`);
         const stableTag = `stable-${shaTag}`;
         await this.archive.moveAndPublish({ ...docker, tag: shaTag }, { ...docker, tag: stableTag });
         core.info(`Tagged ${docker.image}:${stableTag} — permanent prod release marker`);
@@ -3444,14 +3445,19 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         const docker = stage.publish.docker;
         // SHA_TAG env var allows CD repos to override the commitHash-based sha tag.
         // Set via workflow_call input sha_tag → the lib passes it as SHA_TAG env var.
-        const shaTag = process.env.SHA_TAG ?? `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`;
+        // Use || (not ??): an EMPTY SHA_TAG (push-driven CD passes sha_tag: "") must
+        // fall back to the resolved commitHash, which is the merge's second parent
+        // (the feature tip that built the image) via resolveImageSHA(). With ?? the
+        // empty string short-circuited to "" → archive promoted :latest (not found).
+        const shaTag = (process.env.SHA_TAG?.trim() || `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`);
         await this.archive.moveAndPublish({ ...docker, tag: shaTag }, { ...docker, tag: env });
         core.info(`Promoted ${docker.image}:${shaTag} → ${docker.image}:${env}`);
     }
     async createGitTag() {
-        const version = this.config.metadata.version;
-        const sha = (0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '');
-        const tag = `v${version}-sha-${sha}`;
+        // version is optional — resolve (explicit → GitVersion → date) so the tag is
+        // never "vundefined-...". resolve() already appends -sha-<short>.
+        const resolved = await GitVersionResolver_1.GitVersionResolver.resolve(this.config.metadata.version, this.config.metadata.commitHash);
+        const tag = `v${resolved}`;
         const { execSync } = await Promise.resolve().then(() => __importStar(__nccwpck_require__(35317)));
         core.info(`Creating git tag ${tag}`);
         execSync(`git tag ${tag}`);
@@ -3650,6 +3656,7 @@ const ArchiveManager_1 = __nccwpck_require__(62771);
 const StageMessage_1 = __nccwpck_require__(22238);
 const ImageSHA_1 = __nccwpck_require__(2870);
 const DockerArtifactManager_1 = __nccwpck_require__(68942);
+const GitVersionResolver_1 = __nccwpck_require__(46601);
 class PublishStage extends AbstractStage_1.AbstractStage {
     archive = new ArchiveManager_1.ArchiveManager();
     async run(stage) {
@@ -3659,8 +3666,10 @@ class PublishStage extends AbstractStage_1.AbstractStage {
             const image = stage.publish?.docker?.image ?? this.deriveImage();
             const fullSHA = this.config.metadata.commitHash ?? 'unknown';
             const shaTag = `sha-${(0, ImageSHA_1.shortSHA)(fullSHA)}`;
-            const version = this.config.metadata.version;
-            const versionTag = `v${version}-${shaTag}`;
+            // metadata.version is optional — resolve via GitVersionResolver (explicit →
+            // GitVersion → date fallback) so the tag is never "vundefined-...".
+            const version = await GitVersionResolver_1.GitVersionResolver.resolve(this.config.metadata.version, fullSHA);
+            const versionTag = `v${version}`;
             // Export OCI metadata so docker build commands in stage.commands can use them
             StageMessage_1.StageMessage.exportEnv('IMAGE_TAG', shaTag);
             StageMessage_1.StageMessage.exportEnv('IMAGE_VERSION', versionTag);
