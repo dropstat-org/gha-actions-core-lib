@@ -16,10 +16,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# GitHub validates ALL permissions declared by ANY job in the called reusable at
+# startup (even jobs skipped at runtime) — they must be granted here or the run
+# fails with startup_failure. Match the reusable pipeline-ci.yml job permissions.
 permissions:
   id-token:        write
-  contents:        read
-  packages:        read
+  contents:        write
+  packages:        write
   security-events: write
   actions:         read
 
