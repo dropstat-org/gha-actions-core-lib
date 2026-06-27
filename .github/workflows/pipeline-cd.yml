@@ -68,6 +68,7 @@ jobs:
       post_deploy_enabled: ${{ steps.cfg.outputs.post_deploy_enabled }}
       release_enabled:     ${{ steps.cfg.outputs.release_enabled }}
       ecs_deploy_enabled:  ${{ steps.cfg.outputs.ecs_deploy_enabled }}
+      s3_deploy_enabled:   ${{ steps.cfg.outputs.s3_deploy_enabled }}
       deploy_environment:  ${{ steps.cfg.outputs.deploy_environment }}
       tools_terraform:     ${{ steps.cfg.outputs.tools_terraform }}
       tools_terragrunt:    ${{ steps.cfg.outputs.tools_terragrunt }}
@@ -274,6 +275,43 @@ jobs:
           SHA_TAG: ${{ inputs.sha_tag }}
           # Opt-in per repo: bypass the prod-account guard (test repos that deploy
           # prod->dev). Empty for normal repos, so the guard stays on.
+          DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
+
+  # ── S3 Deploy: static frontend (S3 sync + CloudFront invalidation) ───────────
+  # Build-once: downloads the dist artifact built in CI and syncs it to the env's
+  # bucket. Env routed by branch (develop→dev, release/*→qa, main→prod); targets in
+  # deploy.yaml. GITHUB_TOKEN is needed for the gh run download of the CI artifact.
+  s3_deploy:
+    name: S3 Deploy
+    needs: [config]
+    if: needs.config.outputs.s3_deploy_enabled == 'true'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 30
+    environment: ${{ needs.config.outputs.deploy_environment }}
+    permissions:
+      id-token: write
+      contents: read
+      actions:  read   # gh run download of the CI dist artifact
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
+          fetch-depth: 2
+      - name: Setup AWS credentials
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-s3-deploy
+          terraform-version: ${{ needs.config.outputs.tools_terraform }}
+          terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: s3_deploy
+        env:
+          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
 
   # ── Release: git tag (terraform) or ECR promotion (app) ──────────────────────
