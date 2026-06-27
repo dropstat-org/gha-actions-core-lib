@@ -322,13 +322,14 @@ jobs:
 
   release:
     name: Release
-    needs: [config, deploy, ecs_deploy]
+    needs: [config, deploy, ecs_deploy, s3_deploy]
     if: |
       always() &&
       needs.config.outputs.release_enabled == 'true' &&
       (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
       (needs.ecs_deploy.result == 'success' || needs.ecs_deploy.result == 'skipped') &&
-      (needs.deploy.result == 'success' || needs.ecs_deploy.result == 'success')
+      (needs.s3_deploy.result == 'success' || needs.s3_deploy.result == 'skipped') &&
+      (needs.deploy.result == 'success' || needs.ecs_deploy.result == 'success' || needs.s3_deploy.result == 'success')
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 60
     permissions:
