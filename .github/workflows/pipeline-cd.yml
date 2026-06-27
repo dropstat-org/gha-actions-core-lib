@@ -410,6 +410,47 @@ jobs:
           SHA_TAG: ${{ inputs.sha_tag }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
 
+  # ── S3 Deploy UAT (release/* only, runs after qa deploy + release succeed) ──────
+  # Mirrors ecs_deploy_uat for static frontends. DEPLOY_TARGET=uat → the lib routes
+  # the release/* CD to the uat environment (S3DeployStage.onRelease). GitHub
+  # environment: uat provides the approval gate.
+  s3_deploy_uat:
+    name: S3 Deploy (uat)
+    needs: [config, s3_deploy, release]
+    if: |
+      always() &&
+      needs.config.outputs.s3_deploy_enabled == 'true' &&
+      needs.config.outputs.deploy_environment == 'qa' &&
+      needs.s3_deploy.result == 'success' &&
+      needs.release.result == 'success'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 30
+    environment: uat
+    permissions:
+      id-token: write
+      contents: read
+      actions:  read
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.deploy_ref }}
+          fetch-depth: 2
+      - name: Setup AWS credentials
+        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          session-name: GitHubActions-cd-s3-deploy-uat
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      - uses: dropstat-org/gha-actions-core-lib@main
+        with:
+          stage: s3_deploy
+        env:
+          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          DEPLOY_TARGET: uat
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
+          DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
+
   release_uat:
     name: Release (uat)
     needs: [config, ecs_deploy_uat]
