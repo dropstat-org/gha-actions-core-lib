@@ -3778,8 +3778,46 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         const tag = `v${resolved}`;
         const { execSync } = await Promise.resolve().then(() => __importStar(__nccwpck_require__(35317)));
         core.info(`Creating git tag ${tag}`);
-        execSync(`git tag ${tag}`);
-        execSync(`git push origin ${tag}`);
+        try {
+            execSync(`git tag ${tag}`);
+            execSync(`git push origin ${tag}`);
+        }
+        catch {
+            core.info(`Tag ${tag} already exists — skipping tag push`);
+        }
+        await this.createGitHubRelease(tag);
+    }
+    /**
+     * Creates a GitHub Release for the tag (REST API — `gh` CLI is not on the
+     * self-hosted runners). Idempotent: a 422 (release already exists for the tag)
+     * is treated as success. Static frontends have no ECR image, so the tag + Release
+     * is the release artifact; backends get it in addition to the ECR promotion.
+     */
+    async createGitHubRelease(tag) {
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        const token = process.env.GITHUB_TOKEN ?? '';
+        if (!repo || !token) {
+            core.warning('GitHub Release skipped — GITHUB_REPOSITORY/GITHUB_TOKEN not set');
+            return;
+        }
+        const res = await fetch(`https://api.github.com/repos/${repo}/releases`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${token}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+            },
+            body: JSON.stringify({ tag_name: tag, name: tag, generate_release_notes: true }),
+        });
+        if (res.ok) {
+            core.info(`Created GitHub Release ${tag}`);
+        }
+        else if (res.status === 422) {
+            core.info(`GitHub Release ${tag} already exists — skipping`);
+        }
+        else {
+            core.warning(`GitHub Release ${tag} failed (HTTP ${res.status})`);
+        }
     }
 }
 exports.AppRelease = AppRelease;
