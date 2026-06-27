@@ -3065,9 +3065,11 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     }
     /**
      * Downloads the dist artifact produced by the CI build run (build-once).
-     * Resolves the latest successful "Pipeline CI" run for this repo and pulls the
-     * named artifact into distPath. Skips download if distPath already has files
-     * (e.g. the workflow pre-downloaded it).
+     * Finds the most recent successful "Pipeline CI" run that actually contains the
+     * named artifact and unzips it into distPath. Skips if distPath already has files.
+     *
+     * Uses the GitHub REST API (global fetch + `unzip`) rather than the `gh` CLI —
+     * the self-hosted runners do not have `gh` on PATH, but curl/unzip/node are present.
      */
     async downloadDist(artifact, distPath) {
         if (fs.existsSync(distPath) && fs.readdirSync(distPath).length > 0) {
@@ -3075,19 +3077,51 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             return;
         }
         const repo = process.env.GITHUB_REPOSITORY ?? '';
-        let runId = '';
-        await exec.exec('gh', [
-            'run', 'list', '--repo', repo,
-            '--json', 'databaseId,conclusion,name',
-            '--jq', '[.[] | select(.conclusion=="success" and .name=="Pipeline CI")][0].databaseId',
-        ], { listeners: { stdout: (d) => { runId += d.toString(); } } });
-        runId = runId.trim();
-        if (!runId) {
-            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: could not find a successful 'Pipeline CI' run to download artifact '${artifact}' from`);
+        const token = process.env.GITHUB_TOKEN ?? '';
+        if (!repo || !token) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: GITHUB_REPOSITORY and GITHUB_TOKEN are required to download the dist artifact`);
         }
-        core.info(`Downloading dist artifact '${artifact}' from CI run ${runId}`);
+        const api = `https://api.github.com/repos/${repo}`;
+        const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
+        // Most-recent-first successful runs; pick the first "Pipeline CI" run that has the artifact.
+        const runsRes = await fetch(`${api}/actions/runs?status=success&per_page=50`, { headers });
+        if (!runsRes.ok) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: listing runs failed (HTTP ${runsRes.status})`);
+        }
+        const runs = (await runsRes.json()).workflow_runs ?? [];
+        const ciRuns = runs.filter(r => r.name === 'Pipeline CI');
+        let archiveUrl = '';
+        let fromRun = 0;
+        for (const run of ciRuns) {
+            const aRes = await fetch(`${api}/actions/runs/${run.id}/artifacts`, { headers });
+            if (!aRes.ok)
+                continue;
+            const arts = (await aRes.json()).artifacts ?? [];
+            const match = arts.find(a => a.name === artifact);
+            if (match) {
+                archiveUrl = match.archive_download_url;
+                fromRun = run.id;
+                break;
+            }
+        }
+        if (!archiveUrl) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no successful 'Pipeline CI' run with artifact '${artifact}' found (checked ${ciRuns.length} runs)`);
+        }
+        core.info(`Downloading dist artifact '${artifact}' from CI run ${fromRun}`);
+        // archive_download_url 302-redirects to a signed blob URL; the Authorization
+        // header must NOT follow to the blob host, so resolve the redirect manually.
+        const redir = await fetch(archiveUrl, { headers, redirect: 'manual' });
+        const location = redir.headers.get('location');
+        const blobRes = location ? await fetch(location) : redir;
+        if (!blobRes.ok) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: artifact download failed (HTTP ${blobRes.status})`);
+        }
         fs.rmSync(distPath, { recursive: true, force: true });
-        await exec.exec('gh', ['run', 'download', runId, '--repo', repo, '--name', artifact, '--dir', distPath]);
+        fs.mkdirSync(distPath, { recursive: true });
+        const zipPath = path.join(process.cwd(), `${artifact}.zip`);
+        fs.writeFileSync(zipPath, Buffer.from(await blobRes.arrayBuffer()));
+        await exec.exec('unzip', ['-o', '-q', zipPath, '-d', distPath]);
+        fs.rmSync(zipPath, { force: true });
     }
     readDeployConfig(env) {
         const filePath = path.join(process.cwd(), 'deploy.yaml');
@@ -142494,6 +142528,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -152820,6 +152872,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156035,132 +156213,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156231,24 +156283,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
