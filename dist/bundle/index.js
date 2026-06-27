@@ -822,6 +822,7 @@ var StageName;
     StageName["SETUP_TERRAGRUNT"] = "setup-terragrunt";
     StageName["GENERIC"] = "generic";
     StageName["ECS_DEPLOY"] = "ecs_deploy";
+    StageName["S3_DEPLOY"] = "s3_deploy";
 })(StageName || (exports.StageName = StageName = {}));
 //# sourceMappingURL=StageName.js.map
 
@@ -955,6 +956,7 @@ const DeployStage_1 = __nccwpck_require__(79494);
 const PreDeployStage_1 = __nccwpck_require__(41405);
 const PostDeployStage_1 = __nccwpck_require__(31244);
 const ECSDeployStage_1 = __nccwpck_require__(24133);
+const S3DeployStage_1 = __nccwpck_require__(97760);
 const ActionsType_1 = __nccwpck_require__(15515);
 const simpleRegistry = new Map([
     [StageName_1.StageName.COMPILE, CompileStage_1.CompileStage],
@@ -974,6 +976,7 @@ const branchAwareRegistry = new Map([
     [StageName_1.StageName.PRE_DEPLOY, PreDeployStage_1.PreDeployStage],
     [StageName_1.StageName.POST_DEPLOY, PostDeployStage_1.PostDeployStage],
     [StageName_1.StageName.ECS_DEPLOY, ECSDeployStage_1.ECSDeployStage],
+    [StageName_1.StageName.S3_DEPLOY, S3DeployStage_1.S3DeployStage],
 ]);
 function releaseCtorFor(type) {
     switch (type) {
@@ -2909,6 +2912,216 @@ class PreDeployStage extends AbstractDeployStage_1.AbstractDeployStage {
 }
 exports.PreDeployStage = PreDeployStage;
 //# sourceMappingURL=PreDeployStage.js.map
+
+/***/ }),
+
+/***/ 97760:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.S3DeployStage = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const exec = __importStar(__nccwpck_require__(95236));
+const fs = __importStar(__nccwpck_require__(79896));
+const path = __importStar(__nccwpck_require__(16928));
+const yaml = __importStar(__nccwpck_require__(74281));
+const AbstractBranchStage_1 = __nccwpck_require__(64843);
+const Environment_1 = __nccwpck_require__(27413);
+const ActionYaml_1 = __nccwpck_require__(9192);
+const ErrorCode_1 = __nccwpck_require__(9727);
+/**
+ * S3DeployStage — static frontend deploy (S3 sync + CloudFront invalidation).
+ *
+ * Build-once: the dist is built once in the CI run (uploaded as an artifact) and
+ * the SAME dist is promoted/deployed per environment — no rebuild. This stage
+ * downloads that artifact and syncs it to the env's bucket.
+ *
+ * Branch → Environment (enforced; cannot be overridden):
+ *   develop → dev   release/* → qa (+uat 2nd pass)   main/hotfix → prod
+ *
+ * Targets per env live in deploy.yaml (preferred, takes precedence over action.yaml):
+ *   environments:
+ *     dev:  { bucket: desktop-dev.dropstat.com, distribution_id: E..., deploy_role: arn:... }
+ *
+ * action.yaml usage:
+ *   - name: s3_deploy
+ *     deploy: { environment: dev }      # GitHub environment gate
+ *     s3_deploy:
+ *       artifact:  desktop-app-dist      # CI artifact (default: <serviceId>-dist)
+ *       dist_path: build                 # local dir synced (default: build)
+ */
+class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
+    // ── Branch routing ─────────────────────────────────────────────────────────
+    async onDevelop(stage) {
+        await this.deploy(stage, Environment_1.Environment.DEV);
+    }
+    async onRelease(stage) {
+        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
+        await this.deploy(stage, target === 'uat' ? Environment_1.Environment.UAT : Environment_1.Environment.QA);
+    }
+    async onMaster(stage) {
+        await this.deploy(stage, Environment_1.Environment.PROD);
+    }
+    async onHotfix(stage) {
+        await this.deploy(stage, Environment_1.Environment.PROD);
+    }
+    // Build-once: feature builds only — the deploy happens on merge.
+    async onFeature(stage) {
+        core.info('S3DeployStage: feature builds only — deploy runs on merge');
+    }
+    async onDefault(_stage) {
+        core.info(`S3DeployStage: no deploy action for branch '${this.branchType}'`);
+    }
+    // ── Core deploy logic ────────────────────────────────────────────────────────
+    async deploy(stage, env) {
+        const cfg = stage.s3_deploy;
+        if (!cfg) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Stage '${stage.name}' requires an 's3_deploy' config block`);
+        }
+        // Prod security gate — same as ECS: auto runs only reach prod on main; manual
+        // dispatch to prod is allowed (GitHub environment approval is the gate).
+        // The requested env may be declared on `deploy:` (DeployConfig) or `s3_deploy:`.
+        const requestedEnv = stage.deploy?.environment ?? cfg.environment;
+        const isProdRequested = requestedEnv === 'prod' || requestedEnv === 'production';
+        const isManualDispatch = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch';
+        if (env !== Environment_1.Environment.PROD && isProdRequested && !isManualDispatch) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `BLOCKED: 'environment: prod' on automated runs is only allowed on main. ` +
+                `Branch type: '${this.branchType}'. Use workflow_dispatch for manual prod deploys.`);
+        }
+        const effectiveEnv = (isProdRequested && isManualDispatch) ? Environment_1.Environment.PROD : env;
+        const resolve = (val) => val && val.startsWith('$') ? (process.env[val.slice(1)] ?? val) : val;
+        // deploy.yaml takes precedence over action.yaml (keyed by the derived env).
+        const dy = this.readDeployConfig(effectiveEnv);
+        const bucket = dy.bucket ?? resolve(cfg.bucket);
+        const distribution = dy.distribution_id ?? resolve(cfg.distribution_id);
+        const deployRole = dy.deploy_role ?? resolve(cfg.deploy_role);
+        const distPath = cfg.dist_path ?? 'build';
+        const artifact = cfg.artifact ?? `${this.config.metadata.serviceId}-dist`;
+        const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
+        const cfRegion = 'us-east-1'; // CloudFront is global — API in us-east-1
+        if (!bucket) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no bucket for environment '${effectiveEnv}' (set deploy.yaml environments.${effectiveEnv}.bucket or action.yaml s3_deploy.bucket)`);
+        }
+        if (deployRole) {
+            core.info(`Assuming S3 deploy role: ${deployRole} (source: ${dy.deploy_role ? 'deploy.yaml' : 'action.yaml'})`);
+            await this.assumeRole(deployRole, `s3-${effectiveEnv}-${Date.now()}`);
+        }
+        core.info(`\n🚀 S3 Deploy → ${effectiveEnv.toUpperCase()}`);
+        core.info(`   bucket:        s3://${bucket}/`);
+        core.info(`   distribution:  ${distribution ?? '(none — skipping invalidation)'}`);
+        core.info(`   dist:          ${distPath} (artifact: ${artifact})`);
+        // ── Build-once: download the dist artifact from the CI build run ────────────
+        await this.downloadDist(artifact, distPath);
+        // ── Sync to S3 ─────────────────────────────────────────────────────────────
+        const syncArgs = ['s3', 'sync', `${distPath}/`, `s3://${bucket}/`, '--region', region];
+        if (cfg.delete !== false)
+            syncArgs.push('--delete');
+        await exec.exec('aws', syncArgs);
+        // ── CloudFront invalidation (optional) ─────────────────────────────────────
+        if (distribution) {
+            await exec.exec('aws', [
+                'cloudfront', 'create-invalidation',
+                '--distribution-id', distribution,
+                '--paths', '/*',
+                '--region', cfRegion,
+            ]);
+        }
+        core.info(`✅ S3 deploy complete → ${effectiveEnv}`);
+    }
+    /**
+     * Downloads the dist artifact produced by the CI build run (build-once).
+     * Resolves the latest successful "Pipeline CI" run for this repo and pulls the
+     * named artifact into distPath. Skips download if distPath already has files
+     * (e.g. the workflow pre-downloaded it).
+     */
+    async downloadDist(artifact, distPath) {
+        if (fs.existsSync(distPath) && fs.readdirSync(distPath).length > 0) {
+            core.info(`Dist already present in '${distPath}' — skipping artifact download`);
+            return;
+        }
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        let runId = '';
+        await exec.exec('gh', [
+            'run', 'list', '--repo', repo,
+            '--json', 'databaseId,conclusion,name',
+            '--jq', '[.[] | select(.conclusion=="success" and .name=="Pipeline CI")][0].databaseId',
+        ], { listeners: { stdout: (d) => { runId += d.toString(); } } });
+        runId = runId.trim();
+        if (!runId) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: could not find a successful 'Pipeline CI' run to download artifact '${artifact}' from`);
+        }
+        core.info(`Downloading dist artifact '${artifact}' from CI run ${runId}`);
+        fs.rmSync(distPath, { recursive: true, force: true });
+        await exec.exec('gh', ['run', 'download', runId, '--repo', repo, '--name', artifact, '--dir', distPath]);
+    }
+    readDeployConfig(env) {
+        const filePath = path.join(process.cwd(), 'deploy.yaml');
+        if (!fs.existsSync(filePath))
+            return {};
+        try {
+            const cfg = yaml.load(fs.readFileSync(filePath, 'utf8'));
+            const envCfg = cfg?.environments?.[env] ?? {};
+            if (Object.keys(envCfg).length > 0)
+                core.info(`deploy.yaml: loaded config for environment '${env}'`);
+            return envCfg;
+        }
+        catch (e) {
+            core.warning(`deploy.yaml parse error — falling back to action.yaml: ${e}`);
+            return {};
+        }
+    }
+    async assumeRole(roleArn, sessionName) {
+        let json = '';
+        await exec.exec('aws', [
+            'sts', 'assume-role',
+            '--role-arn', roleArn,
+            '--role-session-name', sessionName,
+            '--query', 'Credentials',
+            '--output', 'json',
+        ], { listeners: { stdout: (d) => { json += d.toString(); } } });
+        const c = JSON.parse(json.trim());
+        core.exportVariable('AWS_ACCESS_KEY_ID', c.AccessKeyId);
+        core.exportVariable('AWS_SECRET_ACCESS_KEY', c.SecretAccessKey);
+        core.exportVariable('AWS_SESSION_TOKEN', c.SessionToken);
+    }
+}
+exports.S3DeployStage = S3DeployStage;
+//# sourceMappingURL=S3DeployStage.js.map
 
 /***/ }),
 
@@ -5293,6 +5506,7 @@ const STAGE_FLAGS = [
     { output: 'publish_enabled', stageName: StageName_1.StageName.PUBLISH },
     { output: 'release_enabled', stageName: StageName_1.StageName.RELEASE },
     { output: 'ecs_deploy_enabled', stageName: StageName_1.StageName.ECS_DEPLOY },
+    { output: 's3_deploy_enabled', stageName: StageName_1.StageName.S3_DEPLOY },
     { output: 'deploy_enabled', stageName: StageName_1.StageName.DEPLOY },
     { output: 'pre_deploy_enabled', stageName: StageName_1.StageName.PRE_DEPLOY },
     { output: 'post_deploy_enabled', stageName: StageName_1.StageName.POST_DEPLOY },
@@ -5333,7 +5547,7 @@ class OutputWriter {
         if (phase === 'ci') {
             const CI_DENY = new Set([
                 StageName_1.StageName.PRE_DEPLOY, StageName_1.StageName.DEPLOY, StageName_1.StageName.POST_DEPLOY,
-                StageName_1.StageName.RELEASE, StageName_1.StageName.ECS_DEPLOY,
+                StageName_1.StageName.RELEASE, StageName_1.StageName.ECS_DEPLOY, StageName_1.StageName.S3_DEPLOY,
             ]);
             allowedSlots = new Set([...allowedSlots].filter(s => !CI_DENY.has(s)));
         }
@@ -5345,7 +5559,7 @@ class OutputWriter {
             // a separate CD plan job is redundant; for apps, the image was built once in CI.
             const CD_ALLOW = new Set([
                 StageName_1.StageName.PRE_DEPLOY, StageName_1.StageName.DEPLOY, StageName_1.StageName.POST_DEPLOY,
-                StageName_1.StageName.RELEASE, StageName_1.StageName.ECS_DEPLOY,
+                StageName_1.StageName.RELEASE, StageName_1.StageName.ECS_DEPLOY, StageName_1.StageName.S3_DEPLOY,
             ]);
             if (branchType === BranchType_1.BranchType.PULL_REQUEST) {
                 // PRs are a review gate — never deploy. Keep only branch-allowed checks.
@@ -5381,7 +5595,7 @@ class OutputWriter {
         core.setOutput('tools_terraform', tools.terraform ?? versions.terraform);
         core.setOutput('tools_terragrunt', tools.terragrunt ?? versions.terragrunt);
         core.setOutput('ActionsCoreLib_type', config.type);
-        const deployStage = config.stages.find(s => s.name === StageName_1.StageName.DEPLOY || s.name === StageName_1.StageName.ECS_DEPLOY);
+        const deployStage = config.stages.find(s => s.name === StageName_1.StageName.DEPLOY || s.name === StageName_1.StageName.ECS_DEPLOY || s.name === StageName_1.StageName.S3_DEPLOY);
         // In CD phase the GitHub `environment:` gate (approval + scoped ECS_DEPLOY_ROLE secret)
         // must match the real deploy target, which the lib routes by branch
         // (develop→dev, release/*→qa, master/main→prod). Outside CD, keep the static
@@ -7508,6 +7722,10 @@ const PROMOTE_STAGES = [
     { name: StageName_1.StageName.TRIVY, required: false },
     { name: StageName_1.StageName.RELEASE, required: false },
     { name: StageName_1.StageName.ECS_DEPLOY, required: false },
+    // Static frontends deploy via s3_deploy (S3 sync + CloudFront) instead of
+    // ecs_deploy. Additive: backend repos declare ecs_deploy, frontends declare
+    // s3_deploy — a stage runs only if declared, so this is safe for both.
+    { name: StageName_1.StageName.S3_DEPLOY, required: false },
 ];
 // Feature branches: build (CI) + deploy to dev with sha tag (CD) — no ECR :dev promotion.
 // The :dev tag is only updated on merge to develop (onDevelop promotes sha→:dev).
@@ -142276,6 +142494,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -152602,6 +152838,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -155817,132 +156179,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156013,24 +156249,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
