@@ -265,3 +265,39 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: checkov_tf
+
+  # ── Trigger CD on feature/hotfix/develop pushes ───────────────────────────────
+  # NOT done via `workflow_run` in the caller's pipeline-cd.yml: GitHub evaluates a
+  # job's `environment:` branch-protection gate against the *run's own* ref, which
+  # for workflow_run-triggered runs is always the default branch — never the real
+  # head_branch of the CI run that completed. That made ecs_deploy/s3_deploy fail
+  # with "Branch 'main' is not allowed to deploy to dev" even though the env's
+  # policy explicitly allows feature/*. workflow_dispatch sets github.ref to the
+  # ref we pass below, so the environment gate sees the real branch and passes.
+  # Caller's pipeline-ci.yml must grant `permissions: actions: write` for this job.
+  trigger_cd:
+    name: Trigger CD
+    needs: [config, compile, unit_test, linter, semgrep, sonarqube, trivy, checkov, publish, generic]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/')) &&
+      needs.compile.result   != 'failure' && needs.unit_test.result != 'failure' &&
+      needs.linter.result    != 'failure' && needs.semgrep.result  != 'failure' &&
+      needs.sonarqube.result != 'failure' && needs.trivy.result    != 'failure' &&
+      needs.checkov.result   != 'failure' && needs.publish.result  != 'failure' &&
+      needs.generic.result   != 'failure'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch Pipeline CD for ${{ github.ref_name }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" \
+            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"environment\":\"dev\"}}"
