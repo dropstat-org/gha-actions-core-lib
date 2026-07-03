@@ -6499,7 +6499,7 @@ class PlanSummary {
      */
     static toMarkdown(r) {
         const lines = [
-            `## Terraform Plan: \`${r.account}\``,
+            `### Terraform Plan: \`${r.account}\``,
             '',
         ];
         if (r.modulePath) {
