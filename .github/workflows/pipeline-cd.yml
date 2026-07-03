@@ -30,6 +30,11 @@ on:
         type: string
         required: false
         default: ""
+      deploy_environment:
+        description: "Manual dispatch only: target env (dev/qa/uat/prod) to override branch-derived routing. Empty = route by branch. The GitHub environment gate stays the security boundary."
+        type: string
+        required: false
+        default: ""
       branching_strategy:
         type: string
         required: false
@@ -70,6 +75,11 @@ jobs:
       PIPELINE_PHASE: cd
       PIPELINE_REF: ${{ inputs.deploy_ref }}
       BRANCHING_STRATEGY: ${{ inputs.branching_strategy }}
+      # Manual dispatch only: pick the target env directly (honored by the lib
+      # OutputWriter when GITHUB_EVENT_NAME == workflow_dispatch). Empty on
+      # push/workflow_run → branch derivation. Covers workflow_call (deploy_environment)
+      # and the reusable's own dispatch (environment).
+      DEPLOY_ENVIRONMENT_OVERRIDE: ${{ inputs.deploy_environment || inputs.environment }}
     outputs:
       plan_enabled:        ${{ steps.cfg.outputs.plan_enabled }}
       checkov_tf_enabled:  ${{ steps.cfg.outputs.checkov_tf_enabled }}
