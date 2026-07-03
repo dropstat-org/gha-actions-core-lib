@@ -3332,9 +3332,16 @@ class PlanStage extends AbstractBranchStage_1.AbstractBranchStage {
                         silent: true,
                     });
                     const modulePaths = stdout.split('\n').map(l => l.trim()).filter(Boolean);
-                    core.info(`[plan ${cmdIndex}] discovered ${modulePaths.length} module(s): ${modulePaths.join(', ')}`);
+                    // Single-unit run-all (e.g. management/organizations): the native plan
+                    // lands at the out-dir root, so discovery finds no sub-path. Fall back
+                    // to one module with an empty relative path — buildPerModuleShowCommand
+                    // resolves it against the working-dir root. Without this the entire
+                    // management layer is silently dropped from the summary and the
+                    // sensitive-variable scan.
+                    const effectivePaths = modulePaths.length > 0 ? modulePaths : [''];
+                    core.info(`[plan ${cmdIndex}] discovered ${modulePaths.length} module(s): ${modulePaths.join(', ') || '(single unit at working-dir root)'}`);
                     const modules = [];
-                    for (const modulePath of modulePaths) {
+                    for (const modulePath of effectivePaths) {
                         const { cmd: showModCmd, jsonFile } = extractor.buildPerModuleShowCommand(cmdIndex, modulePath, workingDir);
                         await this.execCommands([showModCmd], this._effectiveTools(stage));
                         modules.push({ modulePath, jsonFile });
@@ -5924,7 +5931,14 @@ class PlanExtractor {
     buildFindModulesCommand(cmdIndex, workingDir) {
         const outDir = this.outDirName(cmdIndex);
         const base = workingDir ? `${workingDir}/${outDir}` : outDir;
-        return `find ${base} -name tfplan.tfplan 2>/dev/null | sed -E "s#^${escapeForSed(base)}/##; s#/tfplan\\.tfplan\\$##"`;
+        // Three substitutions:
+        //   1. strip the out-dir prefix
+        //   2. single-unit dir → the plan file sits at the out-dir root, so after (1)
+        //      the whole string is "tfplan.tfplan" → strip to empty (no sub-path).
+        //   3. multi-unit dir → "vpc/tfplan.tfplan" → "vpc".
+        // Without (2) the single-unit case leaked the literal "tfplan.tfplan" as a
+        // bogus module path, dropping the whole management layer from the summary.
+        return `find ${base} -name tfplan.tfplan 2>/dev/null | sed -E "s#^${escapeForSed(base)}/##; s#^tfplan\\.tfplan\\$##; s#/tfplan\\.tfplan\\$##"`;
     }
     /**
      * Builds the `show -json` command for a single discovered module.
@@ -6359,6 +6373,10 @@ class PlanSummary {
      * Renders the summary as markdown for GitHub Job Summary.
      * Includes the account name, an optional module path (when available),
      * a count table and per-action resource lists.
+     *
+     * Style: compact (`<sub>` — the only reliable way to shrink text in GitHub
+     * markdown, which strips inline CSS) and technical terraform-plan operators
+     * (`+ ~ - ±`) instead of emoji.
      */
     static toMarkdown(r) {
         const lines = [
@@ -6366,17 +6384,17 @@ class PlanSummary {
             '',
         ];
         if (r.modulePath) {
-            lines.push(`> 📁 **Module path:** \`${r.modulePath}\``, '');
+            lines.push(`<sub>&#128193; \`${r.modulePath}\`</sub>`, '');
         }
-        lines.push('| Action    | Count |', '|-----------|------:|', `| ➕ Create  | ${r.toCreate.length}  |`, `| 🔄 Update  | ${r.toUpdate.length}  |`, `| 🗑️ Delete  | ${r.toDelete.length}  |`, `| ♻️ Replace | ${r.toReplace.length} |`, '');
+        lines.push('| | Action | Count |', '|:-:|--------|------:|', `| \`+\`  | <sub>create</sub>  | <sub>${r.toCreate.length}</sub>  |`, `| \`~\`  | <sub>update</sub>  | <sub>${r.toUpdate.length}</sub>  |`, `| \`-\`  | <sub>destroy</sub> | <sub>${r.toDelete.length}</sub>  |`, `| \`±\`  | <sub>replace</sub> | <sub>${r.toReplace.length}</sub> |`, '');
         if (r.toCreate.length)
-            lines.push(...resourceSection('➕ Resources to Create', r.toCreate));
+            lines.push(...resourceSection('`+`', 'create', r.toCreate));
         if (r.toUpdate.length)
-            lines.push(...resourceSection('🔄 Resources to Update', r.toUpdate));
+            lines.push(...resourceSection('`~`', 'update', r.toUpdate));
         if (r.toDelete.length)
-            lines.push(...resourceSection('🗑️ Resources to Delete (destructive)', r.toDelete));
+            lines.push(...resourceSection('`-`', 'destroy (destructive)', r.toDelete));
         if (r.toReplace.length)
-            lines.push(...resourceSection('♻️ Resources to Replace', r.toReplace));
+            lines.push(...resourceSection('`±`', 'replace', r.toReplace));
         return lines.join('\n');
     }
     /**
@@ -6391,6 +6409,23 @@ class PlanSummary {
             `~${r.toUpdate.length} update  ` +
             `-${r.toDelete.length} delete  ` +
             `±${r.toReplace.length} replace`);
+    }
+    /**
+     * Prints one colored, grouped block per plan to the GitHub Actions log —
+     * title + totals line + create/update/delete/replace sections with ANSI
+     * colors (green/yellow/red/magenta). This is the log-side counterpart to the
+     * markdown Job Summary and is emitted at the very end of the plan stage.
+     */
+    static logColored(r) {
+        const title = r.modulePath ? `${r.account}  (${r.modulePath})` : r.account;
+        core.info(`${ANSI.bold}${ANSI.cyan}Terraform Plan: ${title}${ANSI.reset}`);
+        core.info(`${ANSI.dim}Totals = create=${r.toCreate.length}, update=${r.toUpdate.length}, ` +
+            `destroy=${r.toDelete.length}, replace=${r.toReplace.length}, no-op=${r.noOp.length}${ANSI.reset}`);
+        logColoredSection(ANSI.green, '+', 'create', r.toCreate);
+        logColoredSection(ANSI.yellow, '~', 'update', r.toUpdate);
+        logColoredSection(ANSI.red, '-', 'destroy', r.toDelete);
+        logColoredSection(ANSI.magenta, '-/+', 'replace', r.toReplace);
+        core.info('');
     }
     /**
      * Parses all per-account plan JSON files and writes a combined markdown
@@ -6441,15 +6476,15 @@ class PlanSummary {
         const banner = [
             '## 📋 Terraform Plan Summary',
             '',
-            `> **${modules} module${modules !== 1 ? 's' : ''}** &nbsp;|&nbsp; ` +
-                `**${totalChanges} change${totalChanges !== 1 ? 's' : ''}**`,
+            `<sub>**${modules} module${modules !== 1 ? 's' : ''}** &nbsp;·&nbsp; ` +
+                `**${totalChanges} change${totalChanges !== 1 ? 's' : ''}**</sub>`,
             '',
-            '| Action | Count |',
-            '|--------|------:|',
-            `| ➕ Create  | ${totals.create}  |`,
-            `| 🔄 Update  | ${totals.update}  |`,
-            `| 🗑️ Delete  | ${totals.delete}  |`,
-            `| ♻️ Replace | ${totals.replace} |`,
+            '| | Action | Count |',
+            '|:-:|--------|------:|',
+            `| \`+\`  | <sub>create</sub>  | <sub>${totals.create}</sub>  |`,
+            `| \`~\`  | <sub>update</sub>  | <sub>${totals.update}</sub>  |`,
+            `| \`-\`  | <sub>destroy</sub> | <sub>${totals.delete}</sub>  |`,
+            `| \`±\`  | <sub>replace</sub> | <sub>${totals.replace}</sub> |`,
             '',
             '---',
             '',
@@ -6460,16 +6495,52 @@ class PlanSummary {
             core.summary.addRaw(this.toMarkdown(result) + '\n\n---\n\n');
         }
         await core.summary.write();
+        // ── Colored ANSI recap in the log (at the very end of the plan) ────────────
+        const end = Logger_1.Logger.group('📋 Terraform Plan Summary (colored)');
+        try {
+            core.info(`${ANSI.bold}${modules} module(s) · ${totalChanges} change(s)  ` +
+                `${ANSI.green}+${totals.create} create${ANSI.reset}${ANSI.bold}  ` +
+                `${ANSI.yellow}~${totals.update} update${ANSI.reset}${ANSI.bold}  ` +
+                `${ANSI.red}-${totals.delete} destroy${ANSI.reset}${ANSI.bold}  ` +
+                `${ANSI.magenta}±${totals.replace} replace${ANSI.reset}`);
+            core.info('');
+            for (const result of results)
+                this.logColored(result);
+        }
+        finally {
+            end();
+        }
     }
 }
 exports.PlanSummary = PlanSummary;
-function resourceSection(title, items) {
+function resourceSection(icon, label, items) {
     return [
-        `### ${title}`,
+        `#### ${icon} <sub>${label} (${items.length})</sub>`,
         '',
-        ...items.map(r => `- \`${r.address}\` *(${r.type})*`),
+        ...items.map(r => `<sub>${icon} \`${r.address}\` — \`${r.type}\`</sub>  `),
         '',
     ];
+}
+// ── ANSI colored log recap (rendered at the very end of the plan) ─────────────
+// GitHub Actions renders ANSI escape codes in the log viewer, so this gives the
+// full-color per-plan report (create/update/delete/replace) that markdown can't.
+const ANSI = {
+    reset: '\x1b[0m',
+    bold: '\x1b[1m',
+    dim: '\x1b[90m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    red: '\x1b[31m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m',
+};
+function logColoredSection(color, symbol, label, items) {
+    if (items.length === 0)
+        return;
+    core.info(`${color}${ANSI.bold}  ${label} (${items.length}):${ANSI.reset}`);
+    for (const r of items) {
+        core.info(`${color}    ${symbol} ${r.address}${ANSI.reset}${ANSI.dim} [${r.type}]${ANSI.reset}`);
+    }
 }
 //# sourceMappingURL=PlanSummary.js.map
 
@@ -142620,6 +142691,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -152946,6 +153035,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156161,132 +156376,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156357,24 +156446,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
