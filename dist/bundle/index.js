@@ -5878,8 +5878,21 @@ class OutputWriter {
             [BranchType_1.BranchType.RELEASE]: 'qa',
             [BranchType_1.BranchType.MASTER]: 'prod',
         };
+        // Manual dispatch override: DEPLOY_ENVIRONMENT_OVERRIDE (from the workflow_dispatch
+        // `environment` input) lets an operator pick the target env directly instead of the
+        // branch-derived default. Only honored on workflow_dispatch and for a known env — the
+        // GitHub `environment:` gate (approval + branch policy) remains the security boundary,
+        // and prod is still additionally guarded in ECS/S3 deploy stages. Automatic runs
+        // (push / workflow_run) leave the env var empty → branch derivation is unchanged.
+        const isManualDispatch = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch';
+        const envOverride = (process.env.DEPLOY_ENVIRONMENT_OVERRIDE ?? '').trim().toLowerCase();
+        const validEnvs = new Set(['dev', 'qa', 'uat', 'prod']);
+        const useOverride = phase === 'cd' && !!deployStage && isManualDispatch && validEnvs.has(envOverride);
+        if (useOverride) {
+            core.info(`deploy_environment: manual dispatch override → '${envOverride}' (branch would route to '${branchEnv[branchType] ?? 'n/a'}')`);
+        }
         const deployEnvironment = (phase === 'cd' && deployStage)
-            ? (branchEnv[branchType] ?? deployStage.deploy?.environment ?? '')
+            ? (useOverride ? envOverride : (branchEnv[branchType] ?? deployStage.deploy?.environment ?? ''))
             : (deployStage?.deploy?.environment ?? '');
         core.setOutput('deploy_environment', deployEnvironment);
         const deployPolicies = await PlatformConfigLoader_1.PlatformConfigLoader.deployPolicy();
