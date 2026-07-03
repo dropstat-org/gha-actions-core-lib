@@ -3062,7 +3062,12 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         core.info(`   distribution:  ${distribution ?? '(none — skipping invalidation)'}`);
         core.info(`   dist:          ${distPath} (artifact: ${artifact})`);
         // ── Build-once: download the dist artifact from the CI build run ────────────
-        const fromRun = await this.downloadDist(artifact, distPath);
+        // DEPLOY_ARTIFACT_RUN_ID (set from the workflow_dispatch run_id input) pins the
+        // exact CI run to deploy — used for rollback/redeploy of a specific build.
+        // Empty/unset → auto-pick the latest successful CI run with the artifact.
+        const runIdRaw = process.env.DEPLOY_ARTIFACT_RUN_ID?.trim();
+        const runIdOverride = runIdRaw && /^\d+$/.test(runIdRaw) ? Number(runIdRaw) : undefined;
+        const fromRun = await this.downloadDist(artifact, distPath, runIdOverride);
         // Resolve the real content root: the artifact may carry a top-level dir (e.g. a
         // CRA artifact uploaded with `path: build/` zips as `build/index.html`), which —
         // unzipped into distPath — nests as `build/build/index.html`. Syncing distPath
@@ -3125,10 +3130,13 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
      * Uses the GitHub REST API (global fetch + `unzip`) rather than the `gh` CLI —
      * the self-hosted runners do not have `gh` on PATH, but curl/unzip/node are present.
      *
+     * @param runId  optional explicit CI run id to pull the artifact from (rollback /
+     *               redeploy of a specific build). When omitted, the most recent
+     *               successful "Pipeline CI" run containing the artifact is used.
      * @returns the CI run id the artifact came from, or 0 when the dist was already
      *          present locally (skip) — used by the deploy summary to show the source.
      */
-    async downloadDist(artifact, distPath) {
+    async downloadDist(artifact, distPath, runId) {
         if (fs.existsSync(distPath) && fs.readdirSync(distPath).length > 0) {
             core.info(`Dist already present in '${distPath}' — skipping artifact download`);
             return 0;
@@ -3140,31 +3148,44 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         }
         const api = `https://api.github.com/repos/${repo}`;
         const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
-        // Most-recent-first successful runs; pick the first "Pipeline CI" run that has the artifact.
-        const runsRes = await fetch(`${api}/actions/runs?status=success&per_page=50`, { headers });
-        if (!runsRes.ok) {
-            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: listing runs failed (HTTP ${runsRes.status})`);
-        }
-        const runs = (await runsRes.json()).workflow_runs ?? [];
-        const ciRuns = runs.filter(r => r.name === 'Pipeline CI');
+        const artifactsOf = async (id) => {
+            const aRes = await fetch(`${api}/actions/runs/${id}/artifacts`, { headers });
+            if (!aRes.ok)
+                return [];
+            return (await aRes.json()).artifacts ?? [];
+        };
         let archiveUrl = '';
         let fromRun = 0;
-        for (const run of ciRuns) {
-            const aRes = await fetch(`${api}/actions/runs/${run.id}/artifacts`, { headers });
-            if (!aRes.ok)
-                continue;
-            const arts = (await aRes.json()).artifacts ?? [];
-            const match = arts.find(a => a.name === artifact);
-            if (match) {
-                archiveUrl = match.archive_download_url;
-                fromRun = run.id;
-                break;
+        if (runId) {
+            // Explicit run — rollback/redeploy of a specific build.
+            const match = (await artifactsOf(runId)).find(a => a.name === artifact);
+            if (!match) {
+                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: CI run ${runId} has no artifact '${artifact}' (check the run_id input)`);
+            }
+            archiveUrl = match.archive_download_url;
+            fromRun = runId;
+        }
+        else {
+            // Auto-pick: most-recent-first successful "Pipeline CI" run that has the artifact.
+            const runsRes = await fetch(`${api}/actions/runs?status=success&per_page=50`, { headers });
+            if (!runsRes.ok) {
+                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: listing runs failed (HTTP ${runsRes.status})`);
+            }
+            const runs = (await runsRes.json()).workflow_runs ?? [];
+            const ciRuns = runs.filter(r => r.name === 'Pipeline CI');
+            for (const run of ciRuns) {
+                const match = (await artifactsOf(run.id)).find(a => a.name === artifact);
+                if (match) {
+                    archiveUrl = match.archive_download_url;
+                    fromRun = run.id;
+                    break;
+                }
+            }
+            if (!archiveUrl) {
+                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no successful 'Pipeline CI' run with artifact '${artifact}' found (checked ${ciRuns.length} runs)`);
             }
         }
-        if (!archiveUrl) {
-            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no successful 'Pipeline CI' run with artifact '${artifact}' found (checked ${ciRuns.length} runs)`);
-        }
-        core.info(`Downloading dist artifact '${artifact}' from CI run ${fromRun}`);
+        core.info(`Downloading dist artifact '${artifact}' from CI run ${fromRun}${runId ? ' (explicit run_id)' : ''}`);
         // archive_download_url 302-redirects to a signed blob URL; the Authorization
         // header must NOT follow to the blob host, so resolve the redirect manually.
         const redir = await fetch(archiveUrl, { headers, redirect: 'manual' });
