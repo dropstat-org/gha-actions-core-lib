@@ -2536,6 +2536,7 @@ const AbstractBranchStage_1 = __nccwpck_require__(64843);
 const Environment_1 = __nccwpck_require__(27413);
 const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
+const DeploySummary_1 = __nccwpck_require__(54086);
 // Account IDs that are expected per environment.
 // Same-account environments (uat + prod both in management) rely on deploy.yaml
 // mapping the correct role — account check catches cross-account mistakes only.
@@ -2752,6 +2753,16 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         else {
             core.info('✅ Deploy initiated (stability check skipped)');
         }
+        // ── 6. Deploy summary — exact image + targets (job summary + colored log) ──
+        await DeploySummary_1.DeploySummary.write({
+            kind: 'ECS',
+            environment: effectiveEnv,
+            artifact: fullImage ?? `:${imageTag}`,
+            targets: { cluster, service, revision: newArn.split('/').pop() ?? newArn },
+            trigger: isManualDispatch ? 'manual' : 'auto',
+            actor: process.env.GITHUB_ACTOR,
+            commit: process.env.GITHUB_SHA,
+        });
     }
     // ── Helpers ────────────────────────────────────────────────────────────────
     /**
@@ -2964,6 +2975,7 @@ const AbstractBranchStage_1 = __nccwpck_require__(64843);
 const Environment_1 = __nccwpck_require__(27413);
 const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
+const DeploySummary_1 = __nccwpck_require__(54086);
 /**
  * S3DeployStage — static frontend deploy (S3 sync + CloudFront invalidation).
  *
@@ -3050,7 +3062,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         core.info(`   distribution:  ${distribution ?? '(none — skipping invalidation)'}`);
         core.info(`   dist:          ${distPath} (artifact: ${artifact})`);
         // ── Build-once: download the dist artifact from the CI build run ────────────
-        await this.downloadDist(artifact, distPath);
+        const fromRun = await this.downloadDist(artifact, distPath);
         // Resolve the real content root: the artifact may carry a top-level dir (e.g. a
         // CRA artifact uploaded with `path: build/` zips as `build/index.html`), which —
         // unzipped into distPath — nests as `build/build/index.html`. Syncing distPath
@@ -3092,6 +3104,18 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             ]);
         }
         core.info(`✅ S3 deploy complete → ${effectiveEnv}`);
+        // ── Deploy summary — exact artifact + targets (job summary + colored log) ──
+        await DeploySummary_1.DeploySummary.write({
+            kind: 'S3',
+            environment: effectiveEnv,
+            artifact: fromRun ? `${artifact} (CI run ${fromRun})` : `${artifact} (local build)`,
+            targets: distribution
+                ? { bucket: `s3://${bucket}/`, distribution }
+                : { bucket: `s3://${bucket}/` },
+            trigger: isManualDispatch ? 'manual' : 'auto',
+            actor: process.env.GITHUB_ACTOR,
+            commit: process.env.GITHUB_SHA,
+        });
     }
     /**
      * Downloads the dist artifact produced by the CI build run (build-once).
@@ -3100,11 +3124,14 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
      *
      * Uses the GitHub REST API (global fetch + `unzip`) rather than the `gh` CLI —
      * the self-hosted runners do not have `gh` on PATH, but curl/unzip/node are present.
+     *
+     * @returns the CI run id the artifact came from, or 0 when the dist was already
+     *          present locally (skip) — used by the deploy summary to show the source.
      */
     async downloadDist(artifact, distPath) {
         if (fs.existsSync(distPath) && fs.readdirSync(distPath).length > 0) {
             core.info(`Dist already present in '${distPath}' — skipping artifact download`);
-            return;
+            return 0;
         }
         const repo = process.env.GITHUB_REPOSITORY ?? '';
         const token = process.env.GITHUB_TOKEN ?? '';
@@ -3152,6 +3179,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         fs.writeFileSync(zipPath, Buffer.from(await blobRes.arrayBuffer()));
         await exec.exec('unzip', ['-o', '-q', zipPath, '-d', distPath]);
         fs.rmSync(zipPath, { force: true });
+        return fromRun;
     }
     /**
      * Returns the directory that actually holds the site (where index.html lives).
@@ -5036,6 +5064,97 @@ class Credentials {
 }
 exports.Credentials = Credentials;
 //# sourceMappingURL=Credentials.js.map
+
+/***/ }),
+
+/***/ 54086:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DeploySummary = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const A = {
+    reset: '\x1b[0m',
+    bold: '\x1b[1m',
+    dim: '\x1b[90m',
+    green: '\x1b[32m',
+    cyan: '\x1b[36m',
+};
+class DeploySummary {
+    /**
+     * Appends a deploy block to the GitHub Job Summary (markdown, compact) and logs
+     * a colored one-liner. Never throws — a missing GITHUB_STEP_SUMMARY (local/test)
+     * degrades to a warning so a deploy is never failed by its own reporting.
+     */
+    static async write(e) {
+        const meta = [
+            `**artifact:** \`${e.artifact}\``,
+            e.trigger ? `**trigger:** ${e.trigger}` : '',
+            e.actor ? `**by** @${e.actor}` : '',
+            e.commit ? `**commit:** \`${e.commit}\`` : '',
+        ].filter(Boolean).join(' · ');
+        const rows = Object.entries(e.targets).map(([k, v]) => `| <sub>${k}</sub> | <sub>\`${v}\`</sub> |`);
+        const md = [
+            `## 🚀 Deploy — ${e.kind} → \`${e.environment}\``,
+            '',
+            `<sub>${meta}</sub>`,
+            '',
+            '| | |',
+            '|--|--|',
+            ...rows,
+            '',
+            '---',
+            '',
+        ].join('\n');
+        try {
+            core.summary.addRaw(md);
+            await core.summary.write();
+        }
+        catch (err) {
+            core.warning(`DeploySummary: could not write job summary: ${err.message}`);
+        }
+        const tgt = Object.entries(e.targets).map(([k, v]) => `${k}=${v}`).join('  ');
+        core.info(`${A.bold}${A.cyan}🚀 Deploy ${e.kind} → ${e.environment}${A.reset}`);
+        core.info(`${A.green}   ${e.artifact}${A.reset}${A.dim}  ${tgt}${A.reset}`);
+    }
+}
+exports.DeploySummary = DeploySummary;
+//# sourceMappingURL=DeploySummary.js.map
 
 /***/ }),
 
