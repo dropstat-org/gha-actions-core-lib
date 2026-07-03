@@ -25,6 +25,11 @@ on:
         type: string
         required: false
         default: ""
+      run_id:
+        description: "Frontend (S3) only: CI run id to pull the dist artifact from (rollback/redeploy a specific build). Empty = latest successful CI run."
+        type: string
+        required: false
+        default: ""
       branching_strategy:
         type: string
         required: false
@@ -46,6 +51,11 @@ on:
         type: choice
         options: [dev, qa]    # prod only via master/main
         default: dev
+      run_id:
+        description: "Frontend (S3) only: CI run id to deploy (rollback). Empty = latest."
+        required: false
+        type: string
+        default: ""
 
 # PIPELINE_REF makes branch detection use the real deploy branch instead of
 # GITHUB_REF (which points at the default branch under workflow_run). Set per job
@@ -312,6 +322,8 @@ jobs:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
+          # Empty = auto-pick latest CI dist; set = pin to that CI run (rollback).
+          DEPLOY_ARTIFACT_RUN_ID: ${{ inputs.run_id }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
 
   # ── Release: git tag (terraform) or ECR promotion (app) ──────────────────────
