@@ -3638,9 +3638,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SetupTerragruntStage = void 0;
 const exec = __importStar(__nccwpck_require__(95236));
-const fs = __importStar(__nccwpck_require__(79896));
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
-const FileUtil_1 = __nccwpck_require__(10093);
 const Logger_1 = __nccwpck_require__(26747);
 const SopsLoader_1 = __nccwpck_require__(57987);
 class SetupTerragruntStage {
@@ -3657,14 +3655,15 @@ class SetupTerragruntStage {
             Logger_1.Logger.info(`Terragrunt ${version} already installed — skipping download`);
         }
         else {
-            // Remove any pre-existing binary first — on self-hosted AMIs the file may be
-            // root-owned, so curl cannot overwrite it directly. Deleting and recreating
-            // works because /usr/local/bin is world-writable on our custom runner image.
-            if (fs.existsSync(dest))
-                fs.unlinkSync(dest);
             Logger_1.Logger.info(`Installing Terragrunt ${version}...`);
-            await exec.exec('curl', ['-s', '-L', '-o', dest, url]);
-            FileUtil_1.FileUtil.chmod(dest, 0o755);
+            // /usr/local/bin is world-writable on our self-hosted AMI (no sudo needed),
+            // but root-only on GitHub-hosted runners. Delete any stale binary, then try a
+            // direct write; if that fails (root-owned dir), fall back to sudo. Works on both.
+            await exec.exec('bash', ['-c',
+                `{ rm -f "${dest}" 2>/dev/null || sudo rm -f "${dest}"; }; ` +
+                    `if curl -fsSL -o "${dest}" "${url}" 2>/dev/null; then chmod 755 "${dest}"; ` +
+                    `else sudo curl -fsSL -o "${dest}" "${url}" && sudo chmod 755 "${dest}"; fi`,
+            ]);
             Logger_1.Logger.info(`Terragrunt ${version} installed at ${dest}`);
         }
         // Install SOPS for secret file decryption (used by SopsLoader in plan/deploy stages)
