@@ -6106,8 +6106,16 @@ class PlanExtractor {
     buildPerModuleShowCommand(cmdIndex, modulePath, workingDir) {
         const outDir = this.outDirName(cmdIndex);
         const jsonFile = this.rawModuleJsonName(cmdIndex, modulePath);
-        const unitDir = workingDir ? `${workingDir}/${modulePath}` : modulePath;
-        const relPlanFile = workingDir ? `${workingDir}/${outDir}/${modulePath}/tfplan.tfplan` : `${outDir}/${modulePath}/tfplan.tfplan`;
+        // unitDir must never be empty: a single-unit run-all at the repo root has
+        // no --working-dir and an empty modulePath. `terragrunt --working-dir  show`
+        // would then consume "show" as the working-dir argument. Anchor to "." so
+        // terragrunt runs in the invocation cwd (the repo root).
+        const unitDir = workingDir
+            ? (modulePath ? `${workingDir}/${modulePath}` : workingDir)
+            : (modulePath || '.');
+        // Join non-empty segments so an empty modulePath / workingDir never leaves a
+        // stray leading or double slash in the plan-file path.
+        const relPlanFile = [workingDir, outDir, modulePath, 'tfplan.tfplan'].filter(Boolean).join('/');
         // terraform runs `show` from the unit's .terragrunt-cache directory, so a
         // relative plan path won't resolve there — anchor it to the invocation cwd.
         const planFile = `$(pwd)/${relPlanFile}`;
