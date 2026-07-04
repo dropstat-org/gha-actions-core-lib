@@ -3638,6 +3638,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SetupTerragruntStage = void 0;
 const exec = __importStar(__nccwpck_require__(95236));
+const fs = __importStar(__nccwpck_require__(79896));
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const Logger_1 = __nccwpck_require__(26747);
 const SopsLoader_1 = __nccwpck_require__(57987);
@@ -3650,8 +3651,13 @@ class SetupTerragruntStage {
         const dest = '/usr/local/bin/terragrunt';
         const url = `https://github.com/gruntwork-io/terragrunt/releases/download/v${version}/terragrunt_linux_amd64`;
         // Skip download if the correct version is already installed (e.g. pre-baked in AMI).
-        const existing = await exec.getExecOutput(dest, ['--version'], { ignoreReturnCode: true, silent: true });
-        if (existing.exitCode === 0 && existing.stdout.includes(version)) {
+        // Guard with existsSync: on GitHub-hosted runners the binary is absent, and
+        // running a missing executable THROWS ("Unable to locate executable file") —
+        // ignoreReturnCode only suppresses non-zero exits, not a missing binary.
+        const alreadyInstalled = fs.existsSync(dest) &&
+            (await exec.getExecOutput(dest, ['--version'], { ignoreReturnCode: true, silent: true }))
+                .stdout.includes(version);
+        if (alreadyInstalled) {
             Logger_1.Logger.info(`Terragrunt ${version} already installed — skipping download`);
         }
         else {
