@@ -80,6 +80,17 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: compile
+      # Share compiled classes so the SonarQube job (separate workspace) can run
+      # the Java/JVM sensor (needs sonar.java.binaries). No-op for non-JVM repos.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compile-output
+          path: |
+            target/classes
+            build/classes
+          if-no-files-found: ignore
+          retention-days: 1
 
   unit_test:
     name: Unit Test
@@ -142,6 +153,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
+      # Compiled classes from the compile job (sonar.java.binaries). Absent for
+      # non-JVM repos → continue.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: compile-output
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: sonarqube

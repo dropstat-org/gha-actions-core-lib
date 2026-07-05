@@ -1755,6 +1755,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SonarQubeStage = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const exec = __importStar(__nccwpck_require__(95236));
+const fs = __importStar(__nccwpck_require__(79896));
 const AbstractAnalyzerStage_1 = __nccwpck_require__(69751);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
@@ -1781,9 +1782,18 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             const sonarUrl = Credentials_1.Credentials.optional('SONAR_HOST_URL');
             // projectKey = artifactId — generado automáticamente desde projectId+serviceId
             const projectKey = this.config.metadata.artifactId ?? '';
+            // The Java/JVM sensor needs compiled classes (shared from the compile stage
+            // via the compile-output artifact). Point sonar.java.binaries at whatever
+            // build output is present, so a .java project analyzes without erroring.
+            const binDirs = ['target/classes', 'build/classes/java/main', 'build/classes']
+                .filter(d => fs.existsSync(d));
+            if (binDirs.length > 0) {
+                Logger_1.Logger.info(`sonar.java.binaries → ${binDirs.join(',')}`);
+            }
             const args = [
                 `-Dsonar.projectKey=${projectKey}`,
                 `-Dsonar.sources=.`,
+                binDirs.length > 0 ? `-Dsonar.java.binaries=${binDirs.join(',')}` : '',
                 sonarUrl ? `-Dsonar.host.url=${sonarUrl}` : '',
                 sonarToken ? `-Dsonar.token=${sonarToken}` : '',
                 ...(stage.sonar?.args ?? []),
