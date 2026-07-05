@@ -147,7 +147,9 @@ jobs:
           stage: sonarqube
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          # SONAR_HOST_URL is published as an org VARIABLE (non-secret URL) by
+          # github-org; fall back to a secret if some repo sets it that way.
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
 
   trivy:
     name: Trivy
