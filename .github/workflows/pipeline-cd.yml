@@ -249,7 +249,9 @@ jobs:
           stage: deploy
         env:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # gh run download (frontend artifact)
+          # Admin token for terraform repos that manage GitHub resources (github-org);
+          # falls back to the default token (also fine for gh run download).
+          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
