@@ -16,6 +16,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Serialize with the repo's own pipeline-ci/pipeline-cd (same group) so the
+# required-CI plan never runs concurrently with a deploy and collides on the
+# terraform state lock.
+concurrency:
+  group: tf-${{ github.repository }}
+  cancel-in-progress: false
+
 # GitHub validates ALL permissions declared by ANY job in the called reusable at
 # startup (even jobs skipped at runtime) — they must be granted here or the run
 # fails with startup_failure. Match the reusable pipeline-ci.yml job permissions.
