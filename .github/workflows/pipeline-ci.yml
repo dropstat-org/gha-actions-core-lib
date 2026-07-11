@@ -274,9 +274,9 @@ jobs:
           # (e.g. github-org). Admin token when present, else the default token
           # (harmless for AWS-only terraform repos).
           GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
-          # Value that github-org publishes as the org secret SONAR_TOKEN
-          # (count-guarded on non-empty). Empty/unset for every other repo.
-          TF_VAR_sonar_token: ${{ secrets.SONAR_TOKEN }}
+          # Age private key for SopsLoader to decrypt *.secrets.yaml files at the
+          # repo root (e.g. github-org sources TF_VAR_sonar_token from SOPS).
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
 
   checkov_tf:
     name: Checkov Terraform
