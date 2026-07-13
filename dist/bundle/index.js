@@ -3087,6 +3087,17 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const contentRoot = this.resolveContentRoot(distPath);
         if (contentRoot !== distPath)
             core.info(`   content root: ${contentRoot} (artifact had a nested dir)`);
+        // ── Runtime config (build-once) ─────────────────────────────────────────────
+        // deploy.yaml environments.<env>.runtime_config → <contentRoot>/config.js.
+        // The app loads it via <script src="/config.js"> BEFORE the bundle and reads
+        // window.__APP_CONFIG__ instead of baked-in process.env values, so one artifact
+        // serves every environment.
+        const runtimeConfig = dy.runtime_config;
+        if (runtimeConfig && Object.keys(runtimeConfig).length > 0) {
+            const configJs = `window.__APP_CONFIG__ = ${JSON.stringify(runtimeConfig, null, 2)};\n`;
+            fs.writeFileSync(path.join(contentRoot, 'config.js'), configJs);
+            core.info(`   runtime config: config.js written (${Object.keys(runtimeConfig).join(', ')})`);
+        }
         // ── Sync to S3 ─────────────────────────────────────────────────────────────
         const syncArgs = ['s3', 'sync', `${contentRoot}/`, `s3://${bucket}/`, '--region', region];
         if (cfg.delete !== false)
@@ -3108,6 +3119,16 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             if (cacheControl)
                 aclArgs.push('--cache-control', cacheControl);
             await exec.exec('aws', aclArgs);
+        }
+        // Re-upload config.js with no-cache: the sync above stored it with the default
+        // (or global cache_control) policy, but config must never be cached hard — a
+        // stale config.js would keep the app pointing at an old API after a change.
+        if (runtimeConfig && Object.keys(runtimeConfig).length > 0) {
+            const cpArgs = ['s3', 'cp', path.join(contentRoot, 'config.js'), `s3://${bucket}/config.js`,
+                '--cache-control', 'no-cache', '--content-type', 'application/javascript', '--region', region];
+            if (acl)
+                cpArgs.push('--acl', acl);
+            await exec.exec('aws', cpArgs);
         }
         // ── CloudFront invalidation (optional) ─────────────────────────────────────
         if (distribution) {
