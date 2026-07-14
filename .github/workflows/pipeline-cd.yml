@@ -192,7 +192,7 @@ jobs:
       needs.plan.result != 'failure' &&
       needs.pre_deploy.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 5
+    timeout-minutes: 30
     permissions:
       issues: write
     steps:
