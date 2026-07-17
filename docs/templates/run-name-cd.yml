@@ -7,21 +7,22 @@
 # after it starts. So every repo copies this block verbatim into its
 # .github/workflows/pipeline-cd.yml; treat THIS file as the source of truth.
 #
-# Shows TARGET ENV + ARTIFACT in every case:
-#   manual   → Manual deploy → {env} · {sha_tag} · @{actor}
-#   auto-CI  → Auto deploy {branch} → dev · sha-{sha} · after CI
-#   push     → Deploy {branch} → {env} · sha-{sha} · {commit message}
+# Shows TARGET ENV in every case, kept SHORT (GitHub expressions cannot
+# truncate the 40-char sha, so the full sha stays OUT of the title — the exact
+# artifact is in the run's commit link and in the deploy job summary):
+#   manual   → Deploy → {env} · {sha_tag} · @{actor}   (sha_tag is already short)
+#   auto-CI  → Deploy {branch} → dev · after CI
+#   push     → Deploy {branch} → {env} · {commit message}
 # The push env is display-only, derived from the branch with the same rules the
 # lib uses for real routing (develop→dev, release/**→qa, main|master→prod).
 # Repos without the workflow_run auto-chain trigger can drop that middle case.
 
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
-      && format('Manual deploy → {0} · {1} · @{2}', github.event.inputs.environment, github.event.inputs.sha_tag || 'commit', github.actor)
+      && format('Deploy → {0} · {1} · @{2}', github.event.inputs.environment, github.event.inputs.sha_tag || 'commit', github.actor)
       || (github.event_name == 'workflow_run'
-          && format('Auto deploy {0} → dev · sha-{1} · after CI', github.event.workflow_run.head_branch, github.event.workflow_run.head_sha)
-          || format('Deploy {0} → {1} · sha-{2} · {3}',
+          && format('Deploy {0} → dev · after CI', github.event.workflow_run.head_branch)
+          || format('Deploy {0} → {1} · {2}',
                github.ref_name,
                (github.ref_name == 'main' || github.ref_name == 'master') && 'prod' || (startsWith(github.ref_name, 'release/') && 'qa' || 'dev'),
-               github.sha,
                github.event.head_commit.message)) }}
