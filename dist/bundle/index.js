@@ -427,12 +427,24 @@ exports.MANDATORY_STAGES = {
             insertAfter: StageName_1.StageName.LINTER,
             insertBefore: [StageName_1.StageName.SONARQUBE, StageName_1.StageName.TRIVY, StageName_1.StageName.CHECKOV, StageName_1.StageName.PUBLISH, StageName_1.StageName.RELEASE],
         },
+        {
+            // softFail: server compartido aún no desplegado (dropstat-aws-ecs-sonar-qube
+            // pendiente de apply) — no debe romper pipelines mientras tanto.
+            stage: { name: StageName_1.StageName.SONARQUBE, sonar: { softFail: true } },
+            insertAfter: StageName_1.StageName.SEMGREP,
+            insertBefore: [StageName_1.StageName.TRIVY, StageName_1.StageName.CHECKOV, StageName_1.StageName.PUBLISH, StageName_1.StageName.RELEASE],
+        },
     ],
     [ActionsType_1.ActionsType.LIBRARY]: [
         {
             stage: { name: StageName_1.StageName.SEMGREP },
             insertAfter: StageName_1.StageName.LINTER,
             insertBefore: [StageName_1.StageName.SONARQUBE, StageName_1.StageName.RELEASE],
+        },
+        {
+            stage: { name: StageName_1.StageName.SONARQUBE, sonar: { softFail: true } },
+            insertAfter: StageName_1.StageName.SEMGREP,
+            insertBefore: [StageName_1.StageName.RELEASE],
         },
     ],
 };
@@ -1806,11 +1818,12 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
                 exitCode = 1;
             }
             const result = this.mapResult(exitCode);
-            if (result === 'failure') {
+            const softFail = stage.sonar?.softFail ?? false;
+            if (result === 'failure' && !softFail) {
                 core.setFailed(`[${ErrorCode_1.ErrorCode.SONARQUBE_QUALITY_GATE_FAILED}] SonarQube Quality Gate failed`);
             }
             else {
-                this.handleResult(result, stage.name, false);
+                this.handleResult(result, stage.name, softFail);
             }
         }
         finally {
