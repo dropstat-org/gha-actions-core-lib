@@ -4116,6 +4116,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.PublishStage = void 0;
 const core = __importStar(__nccwpck_require__(37484));
+const exec = __importStar(__nccwpck_require__(95236));
 const AbstractStage_1 = __nccwpck_require__(22363);
 const ArchiveManager_1 = __nccwpck_require__(62771);
 const StageMessage_1 = __nccwpck_require__(22238);
@@ -4172,10 +4173,39 @@ class PublishStage extends AbstractStage_1.AbstractStage {
             StageMessage_1.StageMessage.emit(StageMessage_1.StageOutputKey.IMAGE_TAG, shaTag);
             StageMessage_1.StageMessage.emit(StageMessage_1.StageOutputKey.IMAGE_VERSION, versionTag);
             StageMessage_1.StageMessage.emit(StageMessage_1.StageOutputKey.IMAGE_REF, imageRef);
+            await this.writeBuildSummary(fullSHA, shaTag, imageRef);
         }
         finally {
             end();
         }
+    }
+    // Identifies which built artifact corresponds to which commit, for manual
+    // deploy reference (Pipeline CD workflow_dispatch with deploy_ref=<tag>).
+    async commitSubject(sha) {
+        let output = '';
+        try {
+            await exec.exec('git', ['log', '-1', '--format=%s', sha], {
+                ignoreReturnCode: true,
+                listeners: { stdout: (data) => { output += data.toString(); } },
+            });
+        }
+        catch {
+            // best-effort — a missing commit message must not fail the publish
+        }
+        return output.trim() || '(no commit message)';
+    }
+    async writeBuildSummary(fullSHA, shaTag, imageRef) {
+        const message = await this.commitSubject(fullSHA);
+        core.summary
+            .addHeading('Build Artifact', 3)
+            .addTable([
+            [{ data: 'Field', header: true }, { data: 'Value', header: true }],
+            ['Commit', `${fullSHA.slice(0, 7)} — ${message}`],
+            ['Image tag', shaTag],
+            ['Image ref', `\`${imageRef}\``],
+        ])
+            .addRaw('Use `Image ref` above to deploy this exact build manually (Pipeline CD → workflow_dispatch).', true);
+        await core.summary.write();
     }
     buildImageRef(registry, image, tag) {
         if (registry === 'ecr') {
