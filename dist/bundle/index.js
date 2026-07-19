@@ -2218,6 +2218,8 @@ class AbstractStage {
             env['PYTHON_VERSION'] = t.python;
         if (t?.dotnet)
             env['DOTNET_VERSION'] = t.dotnet;
+        if (t?.flutter)
+            env['FLUTTER_VERSION'] = t.flutter;
         return env;
     }
     _effectiveTools(stage) {
@@ -5898,6 +5900,7 @@ class OutputWriter {
         core.setOutput('tools_go', tools.go ?? '');
         core.setOutput('tools_python', tools.python ?? '');
         core.setOutput('tools_dotnet', tools.dotnet ?? '');
+        core.setOutput('tools_flutter', tools.flutter ?? '');
         core.setOutput('tools_terraform', tools.terraform ?? versions.terraform);
         core.setOutput('tools_terragrunt', tools.terragrunt ?? versions.terragrunt);
         core.setOutput('ActionsCoreLib_type', config.type);
