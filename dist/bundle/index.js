@@ -2575,8 +2575,18 @@ const ImageSHA_1 = __nccwpck_require__(2870);
 // mapping the correct role — account check catches cross-account mistakes only.
 const EXPECTED_ACCOUNT = {
     [Environment_1.Environment.DEV]: '453531893227',
+    [Environment_1.Environment.QA]: '548039716168',
     [Environment_1.Environment.UAT]: '174917982419',
     [Environment_1.Environment.PROD]: '174917982419',
+};
+// Manual-dispatch promotion gate: to reach uat/prod via workflow_dispatch, the
+// image must already carry the ECR tag of the stage before it (qa before uat,
+// uat before prod) — i.e. it was actually promoted through the pipeline, not
+// just built on some branch. Automated branch-driven deploys (release→uat,
+// main→prod) are exempt: their ordering already enforces this.
+const REQUIRED_PRIOR_TAG = {
+    [Environment_1.Environment.UAT]: 'qa',
+    [Environment_1.Environment.PROD]: 'uat',
 };
 /**
  * ECSDeployStage — native ECS deployment using task definition registration.
@@ -2588,12 +2598,22 @@ const EXPECTED_ACCOUNT = {
  *   4. Updates the ECS service
  *   5. Optionally waits for service stability
  *
- * Branch → Environment mapping (enforced at TypeScript level, cannot be overridden):
- *   develop   → dev
- *   release/* → qa
- *   main      → prod  ← ONLY main can deploy to prod
+ * Branch → Environment mapping (automatic, on every push):
+ *   feature/* → dev
+ *   develop   → dev AND qa (two parallel deploys, both unguarded)
+ *   release/* → uat (image must already be the one running in qa — enforced by
+ *               the fact that qa only ever gets an image via the develop deploy)
+ *   main      → prod
  *
- * Security gate: if ecs_deploy.environment = 'prod' and branch is NOT main → error.
+ * Manual dispatch (workflow_dispatch) may target ANY of dev/qa/uat/prod directly
+ * via DEPLOY_ENVIRONMENT_OVERRIDE, regardless of source branch. The GitHub
+ * Environment gate (required reviewers on uat/prod) remains the approval
+ * boundary; on top of that, uat/prod additionally require that the requested
+ * image already carries the prior stage's ECR tag (see REQUIRED_PRIOR_TAG) —
+ * you cannot manually ship a develop-only image straight to uat/prod.
+ *
+ * Security gate: if ecs_deploy.environment = 'prod' and branch is NOT main → error
+ * (unless it's a manual dispatch, which is validated by the promotion check instead).
  *
  * action.yaml usage:
  *   - name: deploy
@@ -2610,13 +2630,13 @@ const EXPECTED_ACCOUNT = {
 class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     // ── Branch routing ─────────────────────────────────────────────────────────
     async onDevelop(stage) {
-        await this.deploy(stage, Environment_1.Environment.DEV);
+        // DEPLOY_TARGET=qa → the parallel ecs_deploy_qa job (pipeline-cd.yml) that
+        // runs alongside the dev deploy on every develop push. Unset → dev (default job).
+        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
+        await this.deploy(stage, target === 'qa' ? Environment_1.Environment.QA : Environment_1.Environment.DEV);
     }
     async onRelease(stage) {
-        // DEPLOY_TARGET=uat → second pass of release/* pipeline (uat job in pipeline-cd.yml)
-        // DEPLOY_TARGET=qa or unset → first pass (default)
-        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
-        await this.deploy(stage, target === 'uat' ? Environment_1.Environment.UAT : Environment_1.Environment.QA);
+        await this.deploy(stage, Environment_1.Environment.UAT);
     }
     async onMaster(stage) {
         await this.deploy(stage, Environment_1.Environment.PROD);
@@ -2658,8 +2678,17 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 `Current branch type: '${this.branchType}'. ` +
                 `For manual prod deploys use workflow_dispatch — GitHub Environment approval is required.`);
         }
-        // When manually dispatching to prod from non-main, use prod environment
-        const effectiveEnv = (isProdRequested && isManualDispatch) ? Environment_1.Environment.PROD : env;
+        // Manual dispatch may target ANY environment directly via DEPLOY_ENVIRONMENT_OVERRIDE
+        // (the workflow_dispatch `environment` input), independent of source branch — the
+        // GitHub Environment gate (required reviewers on uat/prod) plus the image-promotion
+        // check below are the security boundary here, not the branch.
+        const manualOverride = (process.env.DEPLOY_ENVIRONMENT_OVERRIDE ?? '').trim().toLowerCase();
+        const OVERRIDE_ENV = {
+            dev: Environment_1.Environment.DEV, qa: Environment_1.Environment.QA, uat: Environment_1.Environment.UAT,
+            prod: Environment_1.Environment.PROD, production: Environment_1.Environment.PROD,
+        };
+        const overrideEnv = isManualDispatch ? OVERRIDE_ENV[manualOverride] : undefined;
+        const effectiveEnv = overrideEnv ?? ((isProdRequested && isManualDispatch) ? Environment_1.Environment.PROD : env);
         // ── Resolve env var references ($VAR) in config values ───────────────────
         // Allows action.yaml to use GitHub environment variables:
         //   cluster: $ECS_CLUSTER  →  process.env.ECS_CLUSTER
@@ -2755,6 +2784,17 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // untouched and avoids a crash-loop on the next deploy.
         if (fullImage) {
             await this.verifyEcrImage(fullImage, region);
+        }
+        // ── 2.6. Manual-dispatch promotion gate ──────────────────────────────────
+        // Only applies when an operator explicitly overrode the target env via
+        // workflow_dispatch. Requires the sha-tagged image to already carry the
+        // prior stage's ECR tag (uat needs :qa, prod needs :uat) — proof it went
+        // through the real pipeline instead of being shipped straight from a
+        // feature/develop build.
+        const requiredPriorTag = REQUIRED_PRIOR_TAG[effectiveEnv];
+        if (isManualDispatch && requiredPriorTag && imageBase && resolvedTag
+            && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true') {
+            await this.verifyPromotion(imageBase, resolvedTag, region, requiredPriorTag, effectiveEnv);
         }
         // ── 3. Register new task definition revision ──────────────────────────────
         let newArn = '';
@@ -2894,6 +2934,41 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 `Ensure the AppRelease stage completed successfully before ECSDeployStage runs.`);
         }
         core.info(`   ECR image verified: ${repoName}:${tag} exists`);
+    }
+    /**
+     * Manual-dispatch promotion gate: confirms the sha-tagged image already carries
+     * the `requiredTag` (e.g. ':qa' before allowing a manual deploy to uat). Runs
+     * after assumeRole, so credentials are already scoped to the target account —
+     * no --registry-id needed, describe-images resolves against the caller's own registry.
+     */
+    async verifyPromotion(repo, shaTag, region, requiredTag, targetEnv) {
+        let response = '';
+        const exitCode = await exec.exec('aws', [
+            'ecr', 'describe-images',
+            '--repository-name', repo,
+            '--image-ids', `imageTag=${shaTag}`,
+            '--query', 'imageDetails[0].imageTags',
+            '--region', region,
+            '--output', 'json',
+        ], {
+            ignoreReturnCode: true,
+            listeners: { stdout: (d) => { response += d.toString(); } },
+        });
+        let tags = [];
+        if (exitCode === 0) {
+            try {
+                tags = JSON.parse(response.trim() || '[]');
+            }
+            catch {
+                tags = [];
+            }
+        }
+        if (!tags.includes(requiredTag)) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: manual dispatch to '${targetEnv}' requires an image already promoted ` +
+                `to ':${requiredTag}' (found tags on ${repo}:${shaTag}: ${tags.join(', ') || 'none'}). ` +
+                `Deploy through the normal pipeline to '${requiredTag}' first, or target '${requiredTag}' instead.`);
+        }
+        core.info(`   Promotion verified: ${repo}:${shaTag} already carries ':${requiredTag}' → manual deploy to ${targetEnv} allowed`);
     }
     async assumeRole(roleArn, sessionName) {
         let json = '';
@@ -3038,11 +3113,13 @@ const DeploySummary_1 = __nccwpck_require__(54086);
 class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     // ── Branch routing ─────────────────────────────────────────────────────────
     async onDevelop(stage) {
-        await this.deploy(stage, Environment_1.Environment.DEV);
+        // DEPLOY_TARGET=qa → the parallel s3_deploy_qa job that runs alongside the
+        // dev deploy on every develop push (mirrors ECSDeployStage.onDevelop).
+        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
+        await this.deploy(stage, target === 'qa' ? Environment_1.Environment.QA : Environment_1.Environment.DEV);
     }
     async onRelease(stage) {
-        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
-        await this.deploy(stage, target === 'uat' ? Environment_1.Environment.UAT : Environment_1.Environment.QA);
+        await this.deploy(stage, Environment_1.Environment.UAT);
     }
     async onMaster(stage) {
         await this.deploy(stage, Environment_1.Environment.PROD);
@@ -3074,7 +3151,16 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `BLOCKED: 'environment: prod' on automated runs is only allowed on main. ` +
                 `Branch type: '${this.branchType}'. Use workflow_dispatch for manual prod deploys.`);
         }
-        const effectiveEnv = (isProdRequested && isManualDispatch) ? Environment_1.Environment.PROD : env;
+        // Manual dispatch may target ANY environment directly via DEPLOY_ENVIRONMENT_OVERRIDE,
+        // independent of source branch (mirrors ECSDeployStage). No image-promotion concept
+        // for static frontends, so the GitHub Environment approval gate is the sole boundary.
+        const manualOverride = (process.env.DEPLOY_ENVIRONMENT_OVERRIDE ?? '').trim().toLowerCase();
+        const OVERRIDE_ENV = {
+            dev: Environment_1.Environment.DEV, qa: Environment_1.Environment.QA, uat: Environment_1.Environment.UAT,
+            prod: Environment_1.Environment.PROD, production: Environment_1.Environment.PROD,
+        };
+        const overrideEnv = isManualDispatch ? OVERRIDE_ENV[manualOverride] : undefined;
+        const effectiveEnv = overrideEnv ?? ((isProdRequested && isManualDispatch) ? Environment_1.Environment.PROD : env);
         const resolve = (val) => val && val.startsWith('$') ? (process.env[val.slice(1)] ?? val) : val;
         // deploy.yaml takes precedence over action.yaml (keyed by the derived env).
         const dy = this.readDeployConfig(effectiveEnv);
@@ -5985,7 +6071,9 @@ class OutputWriter {
             [BranchType_1.BranchType.HOTFIX]: 'dev',
             [BranchType_1.BranchType.HOTFIX_EMERGENCY]: 'dev',
             [BranchType_1.BranchType.DEVELOP]: 'dev',
-            [BranchType_1.BranchType.RELEASE]: 'qa',
+            // release/* now deploys straight to uat — qa is covered by the parallel
+            // deploy_environment_secondary job that runs off develop (see below).
+            [BranchType_1.BranchType.RELEASE]: 'uat',
             [BranchType_1.BranchType.MASTER]: 'prod',
         };
         // Manual dispatch override: DEPLOY_ENVIRONMENT_OVERRIDE (from the workflow_dispatch
@@ -6005,6 +6093,14 @@ class OutputWriter {
             ? (useOverride ? envOverride : (branchEnv[branchType] ?? deployStage.deploy?.environment ?? ''))
             : (deployStage?.deploy?.environment ?? '');
         core.setOutput('deploy_environment', deployEnvironment);
+        // develop pushes deploy to dev (above) AND qa in parallel — this drives a second
+        // job (ecs_deploy_qa / s3_deploy_qa in pipeline-cd.yml) with DEPLOY_TARGET=qa.
+        // Empty (skipped) for every other branch type and for manual-override runs,
+        // where the operator already picked one explicit target.
+        const secondaryEnvironment = (phase === 'cd' && deployStage && !useOverride && branchType === BranchType_1.BranchType.DEVELOP)
+            ? 'qa'
+            : '';
+        core.setOutput('deploy_environment_secondary', secondaryEnvironment);
         const deployPolicies = await PlatformConfigLoader_1.PlatformConfigLoader.deployPolicy();
         const policy = deployPolicies[config.type] ?? { teams: [], users: [], min_permission: '' };
         core.setOutput('deploy_approver_teams', policy.teams.join(','));
@@ -142962,24 +143058,6 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
-
-/***/ }),
-
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -153306,132 +153384,6 @@ exports.listType = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156647,6 +156599,132 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156717,6 +156795,24 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
+
+/***/ }),
+
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
