@@ -183,8 +183,15 @@ class DockerECR {
         const dest = this.fullRef(destination);
         // ECR does NOT auto-create repositories on push (unlike Docker Hub).
         // Ensure the repo exists before tagging/pushing.
-        const { repo } = this.parseRef(dest);
+        const { repo, tag } = this.parseRef(dest);
         await this.ensureRepository(repo);
+        // sha-based tags are content-addressed and immutable by convention — if the
+        // tag is already in ECR, a re-run (retry, re-dispatch) has nothing to do.
+        const alreadyPushed = await this.checkFile(dest);
+        if (alreadyPushed) {
+            core.info(`ECR image ${repo}:${tag} already exists — skipping push ✅`);
+            return;
+        }
         core.info(`Pushing ${source} → ${dest}`);
         await exec.exec('docker', ['tag', source, dest]);
         await exec.exec('docker', ['push', dest]);
