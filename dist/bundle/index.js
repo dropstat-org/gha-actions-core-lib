@@ -2689,7 +2689,11 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         core.info(`   service:   ${service}`);
         core.info(`   image tag: :${imageTag}`);
         // ── 1. Fetch current task definition ─────────────────────────────────────
-        const taskDefName = cfg.task_definition ? resolve(cfg.task_definition) : service;
+        // Same fallback pattern as image_tag: an unset $VAR resolves to its own
+        // literal ("$ECS_TASK_DEFINITION"), which is not a valid family name, so
+        // treat that as "not configured" and fall back to the service name.
+        const resolvedTaskDef = cfg.task_definition ? resolve(cfg.task_definition) : '';
+        const taskDefName = (resolvedTaskDef && !resolvedTaskDef.startsWith('$')) ? resolvedTaskDef : service;
         let taskDefJson = '';
         await exec.exec('aws', [
             'ecs', 'describe-task-definition',
