@@ -343,6 +343,11 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
           ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
+          # Lets action.yaml's ecs_deploy block use $ECS_CLUSTER/$ECS_SERVICE/$ECS_CONTAINER
+          # so the same action.yaml works across dev/qa/uat/prod (per-env GitHub secrets).
+          ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+          ECS_CONTAINER: ${{ secrets.ECS_CONTAINER }}
           SHA_TAG: ${{ inputs.sha_tag }}
           # Opt-in per repo: bypass the prod-account guard (test repos that deploy
           # prod->dev). Empty for normal repos, so the guard stays on.
@@ -517,6 +522,9 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
           ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
+          ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+          ECS_CONTAINER: ${{ secrets.ECS_CONTAINER }}
           SHA_TAG: ${{ inputs.sha_tag }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
 
