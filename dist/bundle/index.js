@@ -230,18 +230,37 @@ class DockerECR {
         const { repo, tag: srcTag } = this.parseRef(this.fullRef(source));
         const { tag: destTag } = this.parseRef(this.fullRef(destination));
         core.info(`Promoting ECR ${repo}:${srcTag} → ${repo}:${destTag} (put-image, no layer transfer)`);
-        // PROD PROTECTION: never overwrite :prod tag — fail hard if it already exists.
-        // Prod can only be tagged by merging to main. Any accidental overwrite is blocked here.
+        // PROD PROTECTION: never overwrite :prod tag with a DIFFERENT image — fail hard.
+        // Prod can only be tagged by merging to main. Re-promoting the exact same digest
+        // (e.g. a re-run, or a chained-merge release that resolves to an already-deployed
+        // build) must stay a no-op, or every re-run of a successful promotion would fail.
         const isProd = destTag === 'prod' || destTag === 'production';
         if (isProd) {
+            let existingDigest = '';
             const existsCode = await exec.exec('aws', [
                 'ecr', 'describe-images',
                 '--region', this.region, '--repository-name', repo,
                 '--image-ids', `imageTag=${destTag}`,
-            ], { ignoreReturnCode: true, silent: true });
-            if (existsCode === 0) {
-                throw new Error(`🚫 BLOCKED: ECR tag ':prod' already exists in ${repo}. ` +
-                    `Prod images are immutable — never overwrite a prod tag.`);
+                '--query', 'imageDetails[0].imageDigest',
+                '--output', 'text',
+            ], { ignoreReturnCode: true, silent: true, listeners: { stdout: (d) => { existingDigest += d.toString(); } } });
+            existingDigest = existingDigest.trim();
+            if (existsCode === 0 && existingDigest && existingDigest !== 'None') {
+                let srcDigest = '';
+                await exec.exec('aws', [
+                    'ecr', 'describe-images',
+                    '--region', this.region, '--repository-name', repo,
+                    '--image-ids', `imageTag=${srcTag}`,
+                    '--query', 'imageDetails[0].imageDigest',
+                    '--output', 'text',
+                ], { silent: true, listeners: { stdout: (d) => { srcDigest += d.toString(); } } });
+                srcDigest = srcDigest.trim();
+                if (srcDigest === existingDigest) {
+                    core.info(`ECR tag ':${destTag}' already points to ${repo}:${srcTag}'s digest — promotion is a no-op ✅`);
+                    return;
+                }
+                throw new Error(`🚫 BLOCKED: ECR tag ':prod' already exists in ${repo} and points to a DIFFERENT image ` +
+                    `(${existingDigest} vs ${srcDigest}). Prod images are immutable — never overwrite a prod tag.`);
             }
         }
         let manifest = '';
