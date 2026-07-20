@@ -4033,9 +4033,14 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     }
     /**
      * Creates a GitHub Release for the tag (REST API — `gh` CLI is not on the
-     * self-hosted runners). Idempotent: a 422 (release already exists for the tag)
-     * is treated as success. Static frontends have no ECR image, so the tag + Release
-     * is the release artifact; backends get it in addition to the ECR promotion.
+     * self-hosted runners). Idempotent: a 422 whose error code is actually
+     * "already_exists" is treated as success. A 422 can also mean the auto-generated
+     * body exceeded GitHub's 125,000-char limit (e.g. no prior matching tag to diff
+     * against, so generate_release_notes walks the entire history) — that case is
+     * NOT a duplicate and must not be silently swallowed; retry once without
+     * generate_release_notes so the Release still gets created. Static frontends
+     * have no ECR image, so the tag + Release is the release artifact; backends
+     * get it in addition to the ECR promotion.
      */
     async createGitHubRelease(tag) {
         const repo = process.env.GITHUB_REPOSITORY ?? '';
@@ -4044,24 +4049,42 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
             core.warning('GitHub Release skipped — GITHUB_REPOSITORY/GITHUB_TOKEN not set');
             return;
         }
+        const headers = {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+        };
         const res = await fetch(`https://api.github.com/repos/${repo}/releases`, {
             method: 'POST',
-            headers: {
-                Authorization: `Bearer ${token}`,
-                Accept: 'application/vnd.github+json',
-                'X-GitHub-Api-Version': '2022-11-28',
-            },
+            headers,
             body: JSON.stringify({ tag_name: tag, name: tag, generate_release_notes: true }),
         });
         if (res.ok) {
             core.info(`Created GitHub Release ${tag}`);
+            return;
         }
-        else if (res.status === 422) {
-            core.info(`GitHub Release ${tag} already exists — skipping`);
+        if (res.status === 422) {
+            const body = await res.json().catch(() => null);
+            const alreadyExists = body?.errors?.some((e) => e.code === 'already_exists');
+            if (alreadyExists) {
+                core.info(`GitHub Release ${tag} already exists — skipping`);
+                return;
+            }
+            core.warning(`GitHub Release ${tag} auto-notes failed (${JSON.stringify(body)}) — retrying without generate_release_notes`);
+            const retry = await fetch(`https://api.github.com/repos/${repo}/releases`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ tag_name: tag, name: tag }),
+            });
+            if (retry.ok) {
+                core.info(`Created GitHub Release ${tag} (without auto-generated notes)`);
+            }
+            else {
+                core.warning(`GitHub Release ${tag} failed (HTTP ${retry.status})`);
+            }
+            return;
         }
-        else {
-            core.warning(`GitHub Release ${tag} failed (HTTP ${res.status})`);
-        }
+        core.warning(`GitHub Release ${tag} failed (HTTP ${res.status})`);
     }
 }
 exports.AppRelease = AppRelease;
@@ -4201,20 +4224,68 @@ class MasterTagRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         execSync(`git tag ${tag}`);
         execSync(`git push origin ${tag}`);
         core.info(`MasterTagRelease: publishing GitHub Release for ${tag}`);
+        await this.createGitHubRelease(tag);
+    }
+    async onDefault(_stage) {
+        core.info(`MasterTagRelease: no action for branch '${this.branchType}'`);
+    }
+    /**
+     * Creates a GitHub Release for the tag via REST API — `gh` CLI is not installed
+     * on the self-hosted runners (see AppRelease.createGitHubRelease, same pattern).
+     * Idempotent on a genuine duplicate (422 errors[].code === 'already_exists');
+     * any other 422 (e.g. auto-generated notes body over the 125,000-char limit)
+     * retries once without generate_release_notes so the Release still gets created.
+     */
+    async createGitHubRelease(tag) {
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        const token = process.env.GITHUB_TOKEN ?? '';
+        if (!repo || !token) {
+            core.warning('GitHub Release skipped — GITHUB_REPOSITORY/GITHUB_TOKEN not set');
+            return;
+        }
+        const headers = {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+        };
         try {
-            execSync(`gh release create ${tag} --title "${tag}" --generate-notes`, {
-                stdio: 'pipe',
-                env: { ...process.env, GH_TOKEN: process.env.GITHUB_TOKEN ?? '' },
+            const res = await fetch(`https://api.github.com/repos/${repo}/releases`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ tag_name: tag, name: tag, generate_release_notes: true }),
             });
+            if (res.ok) {
+                core.info(`Created GitHub Release ${tag}`);
+                return;
+            }
+            if (res.status === 422) {
+                const body = await res.json().catch(() => null);
+                const alreadyExists = body?.errors?.some((e) => e.code === 'already_exists');
+                if (alreadyExists) {
+                    core.info(`GitHub Release ${tag} already exists — skipping`);
+                    return;
+                }
+                core.warning(`GitHub Release ${tag} auto-notes failed (${JSON.stringify(body)}) — retrying without generate_release_notes`);
+                const retry = await fetch(`https://api.github.com/repos/${repo}/releases`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ tag_name: tag, name: tag }),
+                });
+                if (retry.ok) {
+                    core.info(`Created GitHub Release ${tag} (without auto-generated notes)`);
+                }
+                else {
+                    core.warning(`GitHub Release ${tag} failed (HTTP ${retry.status})`);
+                }
+                return;
+            }
+            core.warning(`GitHub Release ${tag} failed (HTTP ${res.status})`);
         }
         catch (err) {
             // Best-effort: the git tag is the source of truth for image resolution
             // (ImageSHA/GitVersionResolver) — a failed Release publish must not fail the pipeline.
             core.warning(`Could not publish GitHub Release for ${tag}: ${err}`);
         }
-    }
-    async onDefault(_stage) {
-        core.info(`MasterTagRelease: no action for branch '${this.branchType}'`);
     }
 }
 exports.MasterTagRelease = MasterTagRelease;
