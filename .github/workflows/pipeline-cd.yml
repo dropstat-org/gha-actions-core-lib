@@ -296,6 +296,9 @@ jobs:
           stage: deploy
         env:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
+          # Env vars set in the config job's own step do NOT propagate to other jobs —
+          # each stage step needs its own copy for the lib's manual-override logic.
+          DEPLOY_ENVIRONMENT_OVERRIDE: ${{ inputs.deploy_environment || inputs.environment }}
           # Admin token for terraform repos that manage GitHub resources (github-org);
           # falls back to the default token (also fine for gh run download).
           GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
@@ -343,6 +346,9 @@ jobs:
           stage: ecs_deploy
         env:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
+          # Env vars set in the config job's own step do NOT propagate to other jobs —
+          # each stage step needs its own copy for the lib's manual-override logic.
+          DEPLOY_ENVIRONMENT_OVERRIDE: ${{ inputs.deploy_environment || inputs.environment }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
@@ -393,6 +399,9 @@ jobs:
           stage: s3_deploy
         env:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
+          # Env vars set in the config job's own step do NOT propagate to other jobs —
+          # each stage step needs its own copy for the lib's manual-override logic.
+          DEPLOY_ENVIRONMENT_OVERRIDE: ${{ inputs.deploy_environment || inputs.environment }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
           # Empty = auto-pick latest CI dist; set = pin to that CI run (rollback).
