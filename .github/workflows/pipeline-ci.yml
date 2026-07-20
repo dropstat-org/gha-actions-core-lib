@@ -88,7 +88,9 @@ jobs:
         with:
           stage: compile
       # Share compiled classes so the SonarQube job (separate workspace) can run
-      # the Java/JVM sensor (needs sonar.java.binaries). No-op for non-JVM repos.
+      # the Java/JVM sensor (needs sonar.java.binaries), and share the built jar
+      # so the Publish job's Docker build doesn't have to recompile from scratch.
+      # No-op for non-JVM repos.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -96,6 +98,8 @@ jobs:
           path: |
             target/classes
             build/classes
+            target/*.jar
+            build/libs/*.jar
           if-no-files-found: ignore
           retention-days: 1
 
@@ -224,6 +228,14 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4.2.2
+      # Reuse the jar/classes already built by the compile job so Dockerfiles
+      # can COPY it in directly instead of re-running the full build inside
+      # the Docker build stage. continue-on-error: non-JVM repos have no
+      # artifact and just build their Dockerfile as before.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: compile-output
       - name: Setup AWS credentials (ECR push)
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
