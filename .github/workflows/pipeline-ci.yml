@@ -223,7 +223,12 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 60
     permissions:
-      contents: read
+      # write: PublishStage.tagBuiltCommit() pushes a built/sha-<shortsha> tag so
+      # CD promotion stages can resolve the built commit through chained merges
+      # (see ImageSHA.ts). read-only here silently 403s that push (swallowed by
+      # ignoreReturnCode — see PublishStage fix) and CD falls back to a broken
+      # single-hop parent walk.
+      contents: write
       packages: write
       id-token: write
     steps:
