@@ -2600,7 +2600,7 @@ const REQUIRED_PRIOR_TAG = {
  *
  * Branch → Environment mapping (automatic, on every push):
  *   feature/* → dev
- *   develop   → dev AND qa (two parallel deploys, both unguarded)
+ *   develop   → qa
  *   release/* → uat (image must already be the one running in qa — enforced by
  *               the fact that qa only ever gets an image via the develop deploy)
  *   main      → prod
@@ -2630,10 +2630,7 @@ const REQUIRED_PRIOR_TAG = {
 class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     // ── Branch routing ─────────────────────────────────────────────────────────
     async onDevelop(stage) {
-        // DEPLOY_TARGET=qa → the parallel ecs_deploy_qa job (pipeline-cd.yml) that
-        // runs alongside the dev deploy on every develop push. Unset → dev (default job).
-        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
-        await this.deploy(stage, target === 'qa' ? Environment_1.Environment.QA : Environment_1.Environment.DEV);
+        await this.deploy(stage, Environment_1.Environment.QA);
     }
     async onRelease(stage) {
         await this.deploy(stage, Environment_1.Environment.UAT);
@@ -3096,8 +3093,8 @@ const DeploySummary_1 = __nccwpck_require__(54086);
  * downloads that artifact and syncs it to the env's bucket.
  *
  * Branch → Environment (enforced; cannot be overridden):
- *   feature/* → dev (sha-tagged, no :dev promotion)   develop → dev
- *   release/* → qa (+uat 2nd pass)   main/hotfix → prod
+ *   feature/* → dev (sha-tagged, no :dev promotion)   develop → qa
+ *   release/* → uat   main/hotfix → prod
  *
  * Targets per env live in deploy.yaml (preferred, takes precedence over action.yaml):
  *   environments:
@@ -3113,10 +3110,7 @@ const DeploySummary_1 = __nccwpck_require__(54086);
 class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     // ── Branch routing ─────────────────────────────────────────────────────────
     async onDevelop(stage) {
-        // DEPLOY_TARGET=qa → the parallel s3_deploy_qa job that runs alongside the
-        // dev deploy on every develop push (mirrors ECSDeployStage.onDevelop).
-        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
-        await this.deploy(stage, target === 'qa' ? Environment_1.Environment.QA : Environment_1.Environment.DEV);
+        await this.deploy(stage, Environment_1.Environment.QA);
     }
     async onRelease(stage) {
         await this.deploy(stage, Environment_1.Environment.UAT);
@@ -3896,8 +3890,7 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     // develop/release promote directly from the built sha (1 level: the branch's
     // merge second parent); prod promotes forward from :uat, matching the
     // REQUIRED_PRIOR_TAG promotion gate in ECSDeployStage (prod requires :uat).
-    //   develop → :dev   from sha-<feature>
-    //   develop → :qa    from sha-<feature>   (DEPLOY_TARGET=qa, parallel qa job)
+    //   develop → :qa    from sha-<feature>
     //   release → :uat   from sha-<feature>
     //   master  → :prod  from :uat
     //   hotfix  → :prod  from sha-<hotfix>    (hotfix builds its own image, skips uat)
@@ -3914,9 +3907,14 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         await this.createGitTag();
     }
     async onDevelop(stage) {
-        // DEPLOY_TARGET=qa → parallel qa job (ecs_deploy_qa/s3_deploy_qa in pipeline-cd.yml)
-        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
-        const env = target === 'qa' ? Environment_1.Environment.QA : Environment_1.Environment.DEV;
+        // develop deploys to qa by default. DEPLOY_TARGET lets a manual dispatch
+        // (workflow_dispatch on develop) redirect the promotion to another
+        // environment, mirroring ECSDeployStage/S3DeployStage's override support.
+        const target = (process.env.DEPLOY_TARGET ?? '').trim().toLowerCase();
+        const OVERRIDE_ENV = {
+            dev: Environment_1.Environment.DEV, qa: Environment_1.Environment.QA, uat: Environment_1.Environment.UAT, prod: Environment_1.Environment.PROD,
+        };
+        const env = OVERRIDE_ENV[target] ?? Environment_1.Environment.QA;
         core.info(`AppRelease: promoting image to ${env} (from sha)`);
         await this.promoteImage(stage, env, this.sourceShaTag());
     }
@@ -6068,9 +6066,7 @@ class OutputWriter {
             [BranchType_1.BranchType.FEATURE]: 'dev',
             [BranchType_1.BranchType.HOTFIX]: 'dev',
             [BranchType_1.BranchType.HOTFIX_EMERGENCY]: 'dev',
-            [BranchType_1.BranchType.DEVELOP]: 'dev',
-            // release/* now deploys straight to uat — qa is covered by the parallel
-            // deploy_environment_secondary job that runs off develop (see below).
+            [BranchType_1.BranchType.DEVELOP]: 'qa',
             [BranchType_1.BranchType.RELEASE]: 'uat',
             [BranchType_1.BranchType.MASTER]: 'prod',
         };
@@ -6091,14 +6087,6 @@ class OutputWriter {
             ? (useOverride ? envOverride : (branchEnv[branchType] ?? deployStage.deploy?.environment ?? ''))
             : (deployStage?.deploy?.environment ?? '');
         core.setOutput('deploy_environment', deployEnvironment);
-        // develop pushes deploy to dev (above) AND qa in parallel — this drives a second
-        // job (ecs_deploy_qa / s3_deploy_qa in pipeline-cd.yml) with DEPLOY_TARGET=qa.
-        // Empty (skipped) for every other branch type and for manual-override runs,
-        // where the operator already picked one explicit target.
-        const secondaryEnvironment = (phase === 'cd' && deployStage && !useOverride && branchType === BranchType_1.BranchType.DEVELOP)
-            ? 'qa'
-            : '';
-        core.setOutput('deploy_environment_secondary', secondaryEnvironment);
         const deployPolicies = await PlatformConfigLoader_1.PlatformConfigLoader.deployPolicy();
         const policy = deployPolicies[config.type] ?? { teams: [], users: [], min_permission: '' };
         core.setOutput('deploy_approver_teams', policy.teams.join(','));
@@ -143056,6 +143044,24 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
+
+/***/ }),
+
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -153382,6 +153388,132 @@ exports.listType = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156597,132 +156729,6 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156793,24 +156799,6 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
-
-/***/ }),
-
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 

@@ -6,9 +6,8 @@ name: Pipeline CD
 #
 # The library's config stage runs with PIPELINE_PHASE=cd, which intersects the
 # branch-allowed stages with the CD set and derives deploy_environment from the
-# branch (develop→dev [+ qa in parallel, see deploy_environment_secondary],
-# release/*→uat, master/main→prod). The GitHub `environment:` gate provides the
-# approval step + scoped ECS_DEPLOY_ROLE secret per environment.
+# branch (develop→qa, release/*→uat, master/main→prod). The GitHub `environment:`
+# gate provides the approval step + scoped ECS_DEPLOY_ROLE secret per environment.
 #
 # Manual dispatch (workflow_dispatch) can target dev/qa/uat/prod directly from
 # any branch via DEPLOY_ENVIRONMENT_OVERRIDE. For uat/prod targets the lib
@@ -93,7 +92,6 @@ jobs:
       ecs_deploy_enabled:  ${{ steps.cfg.outputs.ecs_deploy_enabled }}
       s3_deploy_enabled:   ${{ steps.cfg.outputs.s3_deploy_enabled }}
       deploy_environment:  ${{ steps.cfg.outputs.deploy_environment }}
-      deploy_environment_secondary: ${{ steps.cfg.outputs.deploy_environment_secondary }}
       tools_terraform:     ${{ steps.cfg.outputs.tools_terraform }}
       tools_terragrunt:    ${{ steps.cfg.outputs.tools_terragrunt }}
       ActionsCoreLib_type: ${{ steps.cfg.outputs.ActionsCoreLib_type }}
@@ -454,131 +452,10 @@ jobs:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA_TAG: ${{ inputs.sha_tag }}
-          # Manual dispatch to qa (develop) needs to promote to :qa, not the
-          # onDevelop default (:dev) — this job is the one that runs when
-          # deploy_environment_secondary is empty (i.e. not the push-driven
-          # parallel qa case), so it must also see the override directly.
+          # Manual dispatch may redirect a develop run to another environment
+          # (e.g. dev) — this job is the only one that promotes the image, so
+          # it needs to see the override directly.
           DEPLOY_TARGET: ${{ inputs.deploy_environment }}
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
-          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
-
-  # ── ECS/S3 Deploy QA (develop only, runs in parallel with the dev deploy) ─────
-  # deploy_environment_secondary=='qa' is only emitted for develop pushes (see
-  # OutputWriter). DEPLOY_TARGET=qa tells the lib to promote sha→:qa and deploy
-  # to the QA cluster/role. No approval gate — dev/qa never require approval
-  # (same philosophy as approval_app skipping dev/qa).
-  ecs_deploy_qa:
-    name: ECS Deploy (qa)
-    needs: [config]
-    if: |
-      needs.config.outputs.ecs_deploy_enabled == 'true' &&
-      needs.config.outputs.deploy_environment_secondary == 'qa'
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 60
-    environment: qa
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4.2.2
-        with:
-          ref: ${{ inputs.deploy_ref }}
-          # depth 2 exposes a merge commit's parents so the library can resolve the
-          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
-          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
-          fetch-depth: 2
-      - name: Setup AWS credentials
-        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
-        with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          session-name: GitHubActions-cd-ecs-deploy-qa
-          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
-        with:
-          stage: ecs_deploy
-        env:
-          PIPELINE_REF: ${{ inputs.deploy_ref }}
-          DEPLOY_TARGET: qa
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
-          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-          ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
-          ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
-          ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
-          ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
-          ECS_CONTAINER: ${{ secrets.ECS_CONTAINER }}
-          SHA_TAG: ${{ inputs.sha_tag }}
-          DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
-
-  s3_deploy_qa:
-    name: S3 Deploy (qa)
-    needs: [config]
-    if: |
-      needs.config.outputs.s3_deploy_enabled == 'true' &&
-      needs.config.outputs.deploy_environment_secondary == 'qa'
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
-    environment: qa
-    permissions:
-      id-token: write
-      contents: read
-      actions:  read
-    steps:
-      - uses: actions/checkout@v4.2.2
-        with:
-          ref: ${{ inputs.deploy_ref }}
-          fetch-depth: 2
-      - name: Setup AWS credentials
-        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
-        with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          session-name: GitHubActions-cd-s3-deploy-qa
-          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
-        with:
-          stage: s3_deploy
-        env:
-          PIPELINE_REF: ${{ inputs.deploy_ref }}
-          DEPLOY_TARGET: qa
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
-          DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
-
-  release_qa:
-    name: Release (qa)
-    needs: [config, ecs_deploy_qa, s3_deploy_qa]
-    if: |
-      always() &&
-      needs.config.outputs.release_enabled == 'true' &&
-      needs.config.outputs.deploy_environment_secondary == 'qa' &&
-      (needs.ecs_deploy_qa.result == 'success' || needs.s3_deploy_qa.result == 'success')
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 60
-    permissions:
-      id-token: write
-      contents: write
-    steps:
-      - uses: actions/checkout@v4.2.2
-        with:
-          ref: ${{ inputs.deploy_ref }}
-          # depth 2 exposes a merge commit's parents so the library can resolve the
-          # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
-          # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
-          fetch-depth: 2
-      - name: Setup AWS credentials
-        uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
-        with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          session-name: GitHubActions-cd-release-qa
-          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
-        with:
-          stage: release
-        env:
-          PIPELINE_REF: ${{ inputs.deploy_ref }}
-          DEPLOY_TARGET: qa
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA_TAG: ${{ inputs.sha_tag }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
