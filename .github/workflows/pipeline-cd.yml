@@ -195,7 +195,7 @@ jobs:
       needs.plan.result != 'failure' &&
       needs.pre_deploy.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:
@@ -230,7 +230,7 @@ jobs:
       (needs.config.outputs.ecs_deploy_enabled == 'true' || needs.config.outputs.s3_deploy_enabled == 'true') &&
       (needs.config.outputs.deploy_environment == 'uat' || needs.config.outputs.deploy_environment == 'prod')
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:
