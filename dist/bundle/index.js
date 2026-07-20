@@ -2566,6 +2566,7 @@ const path = __importStar(__nccwpck_require__(16928));
 const yaml = __importStar(__nccwpck_require__(74281));
 const AbstractBranchStage_1 = __nccwpck_require__(64843);
 const Environment_1 = __nccwpck_require__(27413);
+const BranchType_1 = __nccwpck_require__(22302);
 const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const DeploySummary_1 = __nccwpck_require__(54086);
@@ -2579,11 +2580,11 @@ const EXPECTED_ACCOUNT = {
     [Environment_1.Environment.UAT]: '174917982419',
     [Environment_1.Environment.PROD]: '174917982419',
 };
-// Manual-dispatch promotion gate: to reach uat/prod via workflow_dispatch, the
+// Promotion gate: to reach uat/prod (push-driven OR workflow_dispatch), the
 // image must already carry the ECR tag of the stage before it (qa before uat,
 // uat before prod) — i.e. it was actually promoted through the pipeline, not
-// just built on some branch. Automated branch-driven deploys (release→uat,
-// main→prod) are exempt: their ordering already enforces this.
+// just built on some branch. Applies to automated deploys too: release/promotion
+// runs AFTER ecs_deploy in the same run, so ordering does not enforce this.
 const REQUIRED_PRIOR_TAG = {
     [Environment_1.Environment.UAT]: 'qa',
     [Environment_1.Environment.PROD]: 'uat',
@@ -2625,7 +2626,7 @@ const REQUIRED_PRIOR_TAG = {
  *       container:          demo-dev
  *       wait_for_stability: true
  *       # image: dropstat/demo   (optional — lib uses ECR_REGISTRY/image:env)
- *       # image_tag: dev         (optional — defaults to env name)
+ *       # image_tag: $SHA_TAG    (optional — defaults to the commit's sha-<short> tag)
  */
 class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     // ── Branch routing ─────────────────────────────────────────────────────────
@@ -2699,12 +2700,26 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const cluster = deployYaml.cluster ?? resolve(cfg.cluster);
         const service = deployYaml.service ?? resolve(cfg.service);
         const container = deployYaml.container ?? resolve(cfg.container);
-        // image_tag resolution:
+        // image_tag resolution — deploys are ALWAYS by immutable sha tag:
         //   1. cfg.image_tag set and resolves to non-empty → use it (e.g. $SHA_TAG = sha-052c920)
-        //   2. cfg.image_tag resolves to empty (env var not set) → fall back to env name (dev/qa/prod)
-        //   3. cfg.image_tag not set → env name
-        const resolvedTag = cfg.image_tag ? (0, ImageSHA_1.normalizeShaTag)(resolve(cfg.image_tag)) : '';
-        const imageTag = resolvedTag || effectiveEnv;
+        //   2. otherwise → sha of the commit that built the image (metadata.commitHash,
+        //      populated via resolveImageSHA: merge second parent / GITHUB_SHA), the
+        //      exact same resolution AppRelease.sourceShaTag() uses.
+        // Environment aliases (:dev/:qa/:uat/:prod) are audit markers written by
+        // AppRelease AFTER a successful deploy — never a deploy source. Deploying an
+        // alias silently ships whatever the PREVIOUS release left there (one release
+        // behind), so an unresolvable sha is a hard error instead of a fallback.
+        // Same "$VAR" literal guard as task_definition: an unset env var resolves to
+        // its own literal ("$SHA_TAG"), which must count as "not configured".
+        const rawTag = cfg.image_tag ? resolve(cfg.image_tag) : '';
+        const resolvedTag = (rawTag && !rawTag.startsWith('$')) ? (0, ImageSHA_1.normalizeShaTag)(rawTag) : '';
+        const shaOfCommit = this.config.metadata.commitHash ?? (0, ImageSHA_1.resolveImageSHA)();
+        const imageTag = resolvedTag || (shaOfCommit ? `sha-${(0, ImageSHA_1.shortSHA)(shaOfCommit)}` : '');
+        if (!imageTag) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.ECR_IMAGE_NOT_FOUND, 'Cannot resolve the image sha to deploy: SHA_TAG is empty and no commit sha is ' +
+                'available (IMAGE_SHA/GITHUB_SHA unset). Deploys must target an immutable sha-<hash> ' +
+                'tag - environment aliases are audit markers, not deploy sources.');
+        }
         const waitStable = cfg.wait_for_stability !== false;
         const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
         // ── ECS deploy role ───────────────────────────────────────────────────────
@@ -2782,16 +2797,20 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         if (fullImage) {
             await this.verifyEcrImage(fullImage, region);
         }
-        // ── 2.6. Manual-dispatch promotion gate ──────────────────────────────────
-        // Only applies when an operator explicitly overrode the target env via
-        // workflow_dispatch. Requires the sha-tagged image to already carry the
-        // prior stage's ECR tag (uat needs :qa, prod needs :uat) — proof it went
-        // through the real pipeline instead of being shipped straight from a
-        // feature/develop build.
+        // ── 2.6. Promotion gate (uat/prod, push AND manual dispatch) ─────────────
+        // Requires the sha-tagged image to already carry the prior stage's ECR tag
+        // (uat needs :qa, prod needs :uat) — proof it went through the real pipeline
+        // instead of being shipped straight from a feature/develop build. Runs on
+        // automated push-driven deploys too: job ordering does NOT enforce this
+        // (release/promotion runs AFTER ecs_deploy in the same run), so the tag
+        // chain is the only reliable evidence of promotion.
+        // Hotfix is the deliberate exception: it builds its own image and ships
+        // straight to prod (AppRelease promotes hotfix sha → :prod, skipping uat).
         const requiredPriorTag = REQUIRED_PRIOR_TAG[effectiveEnv];
-        if (isManualDispatch && requiredPriorTag && imageBase && resolvedTag
+        const isHotfixToProd = this.branchType === BranchType_1.BranchType.HOTFIX && effectiveEnv === Environment_1.Environment.PROD;
+        if (requiredPriorTag && imageBase && !isHotfixToProd
             && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true') {
-            await this.verifyPromotion(imageBase, resolvedTag, region, requiredPriorTag, effectiveEnv);
+            await this.verifyPromotion(imageBase, imageTag, region, requiredPriorTag, effectiveEnv);
         }
         // ── 3. Register new task definition revision ──────────────────────────────
         let newArn = '';
@@ -2961,7 +2980,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             }
         }
         if (!tags.includes(requiredTag)) {
-            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: manual dispatch to '${targetEnv}' requires an image already promoted ` +
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: deploying to '${targetEnv}' requires an image already promoted ` +
                 `to ':${requiredTag}' (found tags on ${repo}:${shaTag}: ${tags.join(', ') || 'none'}). ` +
                 `Deploy through the normal pipeline to '${requiredTag}' first, or target '${requiredTag}' instead.`);
         }
