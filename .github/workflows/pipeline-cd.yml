@@ -6,11 +6,14 @@ name: Pipeline CD
 #
 # The library's config stage runs with PIPELINE_PHASE=cd, which intersects the
 # branch-allowed stages with the CD set and derives deploy_environment from the
-# branch (develop→dev, release/*→qa, master/main→prod). The GitHub `environment:`
-# gate provides the approval step + scoped ECS_DEPLOY_ROLE secret per environment.
+# branch (develop→dev [+ qa in parallel, see deploy_environment_secondary],
+# release/*→uat, master/main→prod). The GitHub `environment:` gate provides the
+# approval step + scoped ECS_DEPLOY_ROLE secret per environment.
 #
-# Image promotion rules (unchanged, enforced by AppRelease / ECSDeployStage):
-#   develop→:dev  release/*→:qa  master/main→:prod (prod only from master/main).
+# Manual dispatch (workflow_dispatch) can target dev/qa/uat/prod directly from
+# any branch via DEPLOY_ENVIRONMENT_OVERRIDE. For uat/prod targets the lib
+# additionally verifies the image was already promoted to the required prior
+# tag (qa before uat, uat before prod) before deploying.
 
 on:
   workflow_call:
@@ -52,9 +55,9 @@ on:
         type: string
         default: ""
       environment:
-        description: "Target environment"
+        description: "Target environment (uat/prod require the image to already carry the prior-stage tag)"
         type: choice
-        options: [dev, qa]    # prod only via master/main
+        options: [dev, qa, uat, prod]
         default: dev
       run_id:
         description: "Frontend (S3) only: CI run id to deploy (rollback). Empty = latest."
@@ -90,6 +93,7 @@ jobs:
       ecs_deploy_enabled:  ${{ steps.cfg.outputs.ecs_deploy_enabled }}
       s3_deploy_enabled:   ${{ steps.cfg.outputs.s3_deploy_enabled }}
       deploy_environment:  ${{ steps.cfg.outputs.deploy_environment }}
+      deploy_environment_secondary: ${{ steps.cfg.outputs.deploy_environment_secondary }}
       tools_terraform:     ${{ steps.cfg.outputs.tools_terraform }}
       tools_terragrunt:    ${{ steps.cfg.outputs.tools_terragrunt }}
       ActionsCoreLib_type: ${{ steps.cfg.outputs.ActionsCoreLib_type }}
@@ -445,56 +449,20 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
 
-  # ── ECS Deploy UAT (release/* only, runs after qa deploy + release succeed) ─────
-  # DEPLOY_TARGET=uat tells the lib to promote sha→:uat and deploy to UAT cluster/role.
-  # GitHub environment: uat provides the approval gate + ECS_DEPLOY_ROLE secret.
-
-  # ── Review gate (uat promotion): la promocion qa→uat requiere aprobacion manual ──
-  # Mismo issue-approval; corre tras el deploy qa + release exitosos, antes de
-  # ecs_deploy_uat / s3_deploy_uat.
-  approval_uat:
-    name: Approval (uat)
-    needs: [config, ecs_deploy, s3_deploy, release]
+  # ── ECS/S3 Deploy QA (develop only, runs in parallel with the dev deploy) ─────
+  # deploy_environment_secondary=='qa' is only emitted for develop pushes (see
+  # OutputWriter). DEPLOY_TARGET=qa tells the lib to promote sha→:qa and deploy
+  # to the QA cluster/role. No approval gate — dev/qa never require approval
+  # (same philosophy as approval_app skipping dev/qa).
+  ecs_deploy_qa:
+    name: ECS Deploy (qa)
+    needs: [config]
     if: |
-      always() &&
-      needs.config.outputs.deploy_environment == 'qa' &&
-      needs.release.result == 'success' &&
-      (needs.ecs_deploy.result == 'success' || needs.s3_deploy.result == 'success')
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
-    permissions:
-      issues: write
-    steps:
-      - name: Generate app token (team-approver expansion)
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.CD_APPROVAL_APP_ID }}
-          private-key: ${{ secrets.CD_APPROVAL_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-      - name: Manual approval gate
-        uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
-        with:
-          secret: ${{ steps.app-token.outputs.token || github.token }}
-          approvers: ${{ vars.CD_APPROVERS }}
-          minimum-approvals: 1
-          issue-title: "Aprobar promocion a uat: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
-          issue-body: "qa desplegado OK. Comenta approved para promover a uat o denied para cancelar."
-          exclude-workflow-initiator-as-approver: false
-
-  ecs_deploy_uat:
-    name: ECS Deploy (uat)
-    needs: [config, ecs_deploy, release, approval_uat]
-    if: |
-      always() &&
       needs.config.outputs.ecs_deploy_enabled == 'true' &&
-      needs.config.outputs.deploy_environment == 'qa' &&
-      needs.ecs_deploy.result == 'success' &&
-      needs.release.result == 'success' &&
-      needs.approval_uat.result == 'success'
+      needs.config.outputs.deploy_environment_secondary == 'qa'
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 60
-    environment: uat
+    environment: qa
     permissions:
       id-token: write
       contents: read
@@ -510,14 +478,14 @@ jobs:
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          session-name: GitHubActions-cd-ecs-deploy-uat
+          session-name: GitHubActions-cd-ecs-deploy-qa
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: ecs_deploy
         env:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
-          DEPLOY_TARGET: uat
+          DEPLOY_TARGET: qa
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
@@ -528,23 +496,15 @@ jobs:
           SHA_TAG: ${{ inputs.sha_tag }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
 
-  # ── S3 Deploy UAT (release/* only, runs after qa deploy + release succeed) ──────
-  # Mirrors ecs_deploy_uat for static frontends. DEPLOY_TARGET=uat → the lib routes
-  # the release/* CD to the uat environment (S3DeployStage.onRelease). GitHub
-  # environment: uat provides the approval gate.
-  s3_deploy_uat:
-    name: S3 Deploy (uat)
-    needs: [config, s3_deploy, release, approval_uat]
+  s3_deploy_qa:
+    name: S3 Deploy (qa)
+    needs: [config]
     if: |
-      always() &&
       needs.config.outputs.s3_deploy_enabled == 'true' &&
-      needs.config.outputs.deploy_environment == 'qa' &&
-      needs.s3_deploy.result == 'success' &&
-      needs.release.result == 'success' &&
-      needs.approval_uat.result == 'success'
+      needs.config.outputs.deploy_environment_secondary == 'qa'
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 30
-    environment: uat
+    environment: qa
     permissions:
       id-token: write
       contents: read
@@ -558,25 +518,26 @@ jobs:
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          session-name: GitHubActions-cd-s3-deploy-uat
+          session-name: GitHubActions-cd-s3-deploy-qa
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: s3_deploy
         env:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
-          DEPLOY_TARGET: uat
+          DEPLOY_TARGET: qa
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
 
-  release_uat:
-    name: Release (uat)
-    needs: [config, ecs_deploy_uat]
+  release_qa:
+    name: Release (qa)
+    needs: [config, ecs_deploy_qa, s3_deploy_qa]
     if: |
       always() &&
       needs.config.outputs.release_enabled == 'true' &&
-      needs.ecs_deploy_uat.result == 'success'
+      needs.config.outputs.deploy_environment_secondary == 'qa' &&
+      (needs.ecs_deploy_qa.result == 'success' || needs.s3_deploy_qa.result == 'success')
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 60
     permissions:
@@ -594,14 +555,14 @@ jobs:
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          session-name: GitHubActions-cd-release-uat
+          session-name: GitHubActions-cd-release-qa
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: release
         env:
           PIPELINE_REF: ${{ inputs.deploy_ref }}
-          DEPLOY_TARGET: uat
+          DEPLOY_TARGET: qa
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA_TAG: ${{ inputs.sha_tag }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
