@@ -93,6 +93,7 @@ jobs:
       tools_terraform:     ${{ steps.cfg.outputs.tools_terraform }}
       tools_terragrunt:    ${{ steps.cfg.outputs.tools_terragrunt }}
       ActionsCoreLib_type: ${{ steps.cfg.outputs.ActionsCoreLib_type }}
+      resolved_ref:        ${{ steps.resolve_ref.outputs.ref || inputs.deploy_ref }}
     steps:
       - uses: actions/checkout@v4.2.2
         with:
@@ -101,6 +102,31 @@ jobs:
           # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
           # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
           fetch-depth: 0
+      # A hotfix/* PR merged to main produces a push event indistinguishable from a
+      # release/* merge (both land as ref=main) — BranchDetector would misclassify
+      # a hotfix as MASTER and run onMaster() (promote from :uat) instead of
+      # onHotfix() (build its own image, skip uat). Only main is ambiguous this way;
+      # develop/release/** pushes already carry their own real branch name. Look up
+      # the PR associated with this merge commit and override PIPELINE_REF only when
+      # its head branch is hotfix/* — release merges to main must keep resolving to
+      # MASTER, that's the correct final-promotion behavior.
+      - name: Resolve hotfix source branch
+        id: resolve_ref
+        if: github.event_name == 'push' && (inputs.deploy_ref == 'main' || inputs.deploy_ref == 'master')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          HEAD_REF=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            | jq -r '.[0].head.ref // empty')
+          if [[ "$HEAD_REF" == hotfix/* ]]; then
+            echo "Merge source is $HEAD_REF — overriding PIPELINE_REF (was ${{ inputs.deploy_ref }}) so onHotfix() runs"
+            echo "PIPELINE_REF=$HEAD_REF" >> "$GITHUB_ENV"
+            echo "ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ inputs.deploy_ref }}" >> "$GITHUB_OUTPUT"
+          fi
       - id: cfg
         uses: dropstat-org/gha-actions-core-lib@main
         with:
@@ -291,7 +317,7 @@ jobs:
         with:
           stage: deploy
         env:
-          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          PIPELINE_REF: ${{ needs.config.outputs.resolved_ref || inputs.deploy_ref }}
           # Admin token for terraform repos that manage GitHub resources (github-org);
           # falls back to the default token (also fine for gh run download).
           GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
@@ -338,7 +364,7 @@ jobs:
         with:
           stage: ecs_deploy
         env:
-          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          PIPELINE_REF: ${{ needs.config.outputs.resolved_ref || inputs.deploy_ref }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
@@ -390,7 +416,7 @@ jobs:
         with:
           stage: s3_deploy
         env:
-          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          PIPELINE_REF: ${{ needs.config.outputs.resolved_ref || inputs.deploy_ref }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
           # Empty = auto-pick latest CI dist; set = pin to that CI run (rollback).
@@ -440,7 +466,7 @@ jobs:
         with:
           stage: release
         env:
-          PIPELINE_REF: ${{ inputs.deploy_ref }}
+          PIPELINE_REF: ${{ needs.config.outputs.resolved_ref || inputs.deploy_ref }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA_TAG: ${{ inputs.sha_tag }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
