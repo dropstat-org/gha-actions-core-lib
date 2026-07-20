@@ -2810,7 +2810,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const isHotfixToProd = this.branchType === BranchType_1.BranchType.HOTFIX && effectiveEnv === Environment_1.Environment.PROD;
         if (requiredPriorTag && imageBase && !isHotfixToProd
             && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true') {
-            await this.verifyPromotion(imageBase, imageTag, region, requiredPriorTag, effectiveEnv);
+            await this.verifyPromotion(imageBase, imageTag, region, requiredPriorTag, effectiveEnv, ecr);
         }
         // ── 3. Register new task definition revision ──────────────────────────────
         let newArn = '';
@@ -2954,13 +2954,16 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     /**
      * Manual-dispatch promotion gate: confirms the sha-tagged image already carries
      * the `requiredTag` (e.g. ':qa' before allowing a manual deploy to uat). Runs
-     * after assumeRole, so credentials are already scoped to the target account —
-     * no --registry-id needed, describe-images resolves against the caller's own registry.
+     * after assumeRole, so credentials are scoped to the target account, but the
+     * image itself lives in the shared-services ECR registry — cross-account, so
+     * --registry-id is required (mirrors verifyEcrImage's batch-get-image call).
      */
-    async verifyPromotion(repo, shaTag, region, requiredTag, targetEnv) {
+    async verifyPromotion(repo, shaTag, region, requiredTag, targetEnv, ecrRegistryHost) {
+        const registryId = ecrRegistryHost.split('.')[0];
         let response = '';
         const exitCode = await exec.exec('aws', [
             'ecr', 'describe-images',
+            ...(registryId ? ['--registry-id', registryId] : []),
             '--repository-name', repo,
             '--image-ids', `imageTag=${shaTag}`,
             '--query', 'imageDetails[0].imageTags',
