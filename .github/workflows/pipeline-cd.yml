@@ -184,7 +184,7 @@ jobs:
   # ── Review gate: TODO apply terraform requiere aprobacion manual (cualquier env) ──
   # required-reviewers en environments no esta disponible en el plan (repos privados),
   # asi que el gate se hace in-workflow. Este job gatea type=terraform (cualquier env);
-  # los apps se gatean en approval_app (solo uat/prod) y approval_uat (promocion qa→uat).
+  # los apps se gatean en approval_app (solo uat/prod; dev/qa nunca se gatean).
   # El caller debe conceder issues:write (un reusable no puede exceder permisos del caller).
   # Aprobadores: variable CD_APPROVERS (org/repo).
   approval:
