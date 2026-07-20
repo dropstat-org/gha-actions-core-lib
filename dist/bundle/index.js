@@ -4309,9 +4309,17 @@ class PublishStage extends AbstractStage_1.AbstractStage {
     async tagBuiltCommit(fullSHA, shaTag) {
         const tagName = `${ImageSHA_1.BUILD_TAG_PREFIX}${(0, ImageSHA_1.shortSHA)(fullSHA)}`;
         try {
+            // ignoreReturnCode: true so a failed push (e.g. missing contents:write)
+            // doesn't fail the publish — but that also means it won't throw, so the
+            // exit code must be checked explicitly or a 403 gets logged as success.
             await exec.exec('git', ['tag', '-f', tagName, fullSHA], { ignoreReturnCode: true });
-            await exec.exec('git', ['push', 'origin', tagName, '--force'], { ignoreReturnCode: true });
-            core.info(`Tagged ${tagName} -> ${fullSHA} for downstream build-commit resolution`);
+            const pushExitCode = await exec.exec('git', ['push', 'origin', tagName, '--force'], { ignoreReturnCode: true });
+            if (pushExitCode === 0) {
+                core.info(`Tagged ${tagName} -> ${fullSHA} for downstream build-commit resolution`);
+            }
+            else {
+                core.warning(`Could not push build marker tag ${tagName} (git push exited ${pushExitCode}) — CD will fall back to the legacy second-parent walk, which breaks on chained merges. Check the publish job's contents permission.`);
+            }
         }
         catch (err) {
             core.warning(`Could not push build marker tag ${tagName}: ${err}`);
