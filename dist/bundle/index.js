@@ -4200,6 +4200,18 @@ class MasterTagRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         core.info(`MasterTagRelease: creating git tag ${tag}`);
         execSync(`git tag ${tag}`);
         execSync(`git push origin ${tag}`);
+        core.info(`MasterTagRelease: publishing GitHub Release for ${tag}`);
+        try {
+            execSync(`gh release create ${tag} --title "${tag}" --generate-notes`, {
+                stdio: 'pipe',
+                env: { ...process.env, GH_TOKEN: process.env.GITHUB_TOKEN ?? '' },
+            });
+        }
+        catch (err) {
+            // Best-effort: the git tag is the source of truth for image resolution
+            // (ImageSHA/GitVersionResolver) — a failed Release publish must not fail the pipeline.
+            core.warning(`Could not publish GitHub Release for ${tag}: ${err}`);
+        }
     }
     async onDefault(_stage) {
         core.info(`MasterTagRelease: no action for branch '${this.branchType}'`);
