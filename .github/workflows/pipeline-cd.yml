@@ -356,6 +356,10 @@ jobs:
           ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
           ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
           ECS_CONTAINER: ${{ secrets.ECS_CONTAINER }}
+          # Optional: only set when the task-def family differs from the service name
+          # (e.g. uat reusing a pre-existing service/task-def pair). Empty is fine —
+          # ECSDeployStage falls back to $ECS_SERVICE when this resolves empty/unset.
+          ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
           SHA_TAG: ${{ inputs.sha_tag }}
           # Opt-in per repo: bypass the prod-account guard (test repos that deploy
           # prod->dev). Empty for normal repos, so the guard stays on.
