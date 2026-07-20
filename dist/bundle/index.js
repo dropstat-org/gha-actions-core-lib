@@ -6273,8 +6273,17 @@ class OutputWriter {
         if (useOverride) {
             core.info(`deploy_environment: manual dispatch override → '${envOverride}' (branch would route to '${branchEnv[branchType] ?? 'n/a'}')`);
         }
+        // A hotfix/* PR merged to main resolves BranchType.HOTFIX (see BranchDetector /
+        // the CD workflow's PIPELINE_REF override), same as a raw hotfix/* branch push —
+        // but the two must route to different environments: a raw push targets dev for
+        // early testing, while a merge to main must target prod like a master promotion.
+        // GITHUB_REF is untouched by that PIPELINE_REF override, so it still reflects the
+        // real trigger: refs/heads/main|master means this is the merge-to-main case.
+        const realRef = process.env.GITHUB_REF ?? '';
+        const isHotfixMergedToMain = branchType === BranchType_1.BranchType.HOTFIX && /\/(main|master)$/.test(realRef);
+        const branchDeployEnv = isHotfixMergedToMain ? 'prod' : (branchEnv[branchType] ?? deployStage?.deploy?.environment ?? '');
         const deployEnvironment = (phase === 'cd' && deployStage)
-            ? (useOverride ? envOverride : (branchEnv[branchType] ?? deployStage.deploy?.environment ?? ''))
+            ? (useOverride ? envOverride : branchDeployEnv)
             : (deployStage?.deploy?.environment ?? '');
         core.setOutput('deploy_environment', deployEnvironment);
         const deployPolicies = await PlatformConfigLoader_1.PlatformConfigLoader.deployPolicy();
