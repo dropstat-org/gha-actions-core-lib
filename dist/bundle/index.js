@@ -2562,6 +2562,7 @@ const Environment_1 = __nccwpck_require__(27413);
 const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const DeploySummary_1 = __nccwpck_require__(54086);
+const ImageSHA_1 = __nccwpck_require__(2870);
 // Account IDs that are expected per environment.
 // Same-account environments (uat + prod both in management) rely on deploy.yaml
 // mapping the correct role — account check catches cross-account mistakes only.
@@ -2669,7 +2670,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         //   1. cfg.image_tag set and resolves to non-empty → use it (e.g. $SHA_TAG = sha-052c920)
         //   2. cfg.image_tag resolves to empty (env var not set) → fall back to env name (dev/qa/prod)
         //   3. cfg.image_tag not set → env name
-        const resolvedTag = cfg.image_tag ? resolve(cfg.image_tag) : '';
+        const resolvedTag = cfg.image_tag ? (0, ImageSHA_1.normalizeShaTag)(resolve(cfg.image_tag)) : '';
         const imageTag = resolvedTag || effectiveEnv;
         const waitStable = cfg.wait_for_stability !== false;
         const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
@@ -3863,7 +3864,8 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
      * promotes :latest (not found).
      */
     sourceShaTag() {
-        return (process.env.SHA_TAG?.trim() || `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`);
+        const manual = process.env.SHA_TAG?.trim();
+        return manual ? (0, ImageSHA_1.normalizeShaTag)(manual) : `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`;
     }
     /**
      * Promotes an image to an environment tag (put-image, no rebuild).
@@ -5652,6 +5654,7 @@ exports.GitVersionResolver = GitVersionResolver;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.resolveImageSHA = resolveImageSHA;
 exports.shortSHA = shortSHA;
+exports.normalizeShaTag = normalizeShaTag;
 const child_process_1 = __nccwpck_require__(35317);
 /**
  * Resolves the SHA of the commit that originally built the Docker image.
@@ -5679,6 +5682,20 @@ function resolveImageSHA() {
 /** Returns the 7-char short form used in ECR tags (e.g. "sha-4f9c21a"). */
 function shortSHA(fullSHA) {
     return fullSHA.slice(0, 7);
+}
+/**
+ * Normalizes a manually-supplied sha tag (workflow_dispatch input / SHA_TAG env)
+ * to the canonical "sha-<7char>" form used everywhere images are actually tagged.
+ * Handles a bare full SHA, "sha-"+full SHA, or an already-short value — all
+ * collapse to the same short tag, so a manual dispatch with a pasted full commit
+ * SHA still resolves to the image the automated pipeline actually published.
+ * Anything that doesn't look like a hex SHA (e.g. "dev", "qa") passes through unchanged.
+ */
+function normalizeShaTag(tag) {
+    const match = tag.match(/^(?:sha-)?([0-9a-f]{7,40})$/i);
+    if (!match)
+        return tag;
+    return `sha-${match[1].slice(0, 7)}`;
 }
 function getSecondParent(sha) {
     try {
