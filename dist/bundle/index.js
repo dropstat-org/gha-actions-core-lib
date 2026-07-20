@@ -2689,7 +2689,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         core.info(`   service:   ${service}`);
         core.info(`   image tag: :${imageTag}`);
         // ── 1. Fetch current task definition ─────────────────────────────────────
-        const taskDefName = cfg.task_definition ?? service;
+        const taskDefName = cfg.task_definition ? resolve(cfg.task_definition) : service;
         let taskDefJson = '';
         await exec.exec('aws', [
             'ecs', 'describe-task-definition',
