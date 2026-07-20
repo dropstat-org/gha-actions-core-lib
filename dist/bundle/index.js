@@ -3892,18 +3892,18 @@ const Environment_1 = __nccwpck_require__(27413);
 const ImageSHA_1 = __nccwpck_require__(2870);
 const GitVersionResolver_1 = __nccwpck_require__(46601);
 class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
-    // Build-once promotion (mirrors the Groovy library's Docker.move: prod←qa, qa←dev).
-    // Each environment promotes the SAME image forward from the prior env tag, so the
-    // promotion never depends on the merge depth (resolving the sha from the merge's
-    // parents only works one level — it breaks at release→master, two levels deep).
-    //   develop → :dev   from sha-<feature>   (1 level: develop merge's 2nd parent)
-    //   release → :qa    from sha-<feature>   (1 level: release HEAD = develop merge)
-    //   release → :uat   from :qa
-    //   master  → :prod  from :qa             (:qa was set by this release's qa pass)
-    //   hotfix  → :prod  from sha-<hotfix>    (hotfix builds its own image, skips qa)
+    // Build-once promotion (mirrors the Groovy library's Docker.move: prod←uat, uat←sha).
+    // develop/release promote directly from the built sha (1 level: the branch's
+    // merge second parent); prod promotes forward from :uat, matching the
+    // REQUIRED_PRIOR_TAG promotion gate in ECSDeployStage (prod requires :uat).
+    //   develop → :dev   from sha-<feature>
+    //   develop → :qa    from sha-<feature>   (DEPLOY_TARGET=qa, parallel qa job)
+    //   release → :uat   from sha-<feature>
+    //   master  → :prod  from :uat
+    //   hotfix  → :prod  from sha-<hotfix>    (hotfix builds its own image, skips uat)
     async onMaster(stage) {
-        core.info('AppRelease: promoting image to prod (from :qa)');
-        await this.promoteImage(stage, Environment_1.Environment.PROD, Environment_1.Environment.QA);
+        core.info('AppRelease: promoting image to prod (from :uat)');
+        await this.promoteImage(stage, Environment_1.Environment.PROD, Environment_1.Environment.UAT);
         await this.tagStable(stage);
         await this.createGitTag();
     }
@@ -3914,17 +3914,15 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         await this.createGitTag();
     }
     async onDevelop(stage) {
-        core.info('AppRelease: promoting image to dev (from sha)');
-        await this.promoteImage(stage, Environment_1.Environment.DEV, this.sourceShaTag());
+        // DEPLOY_TARGET=qa → parallel qa job (ecs_deploy_qa/s3_deploy_qa in pipeline-cd.yml)
+        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
+        const env = target === 'qa' ? Environment_1.Environment.QA : Environment_1.Environment.DEV;
+        core.info(`AppRelease: promoting image to ${env} (from sha)`);
+        await this.promoteImage(stage, env, this.sourceShaTag());
     }
     async onRelease(stage) {
-        // DEPLOY_TARGET=uat → second pass of release/* pipeline (uat job in pipeline-cd.yml)
-        const target = (process.env.DEPLOY_TARGET ?? '').toLowerCase();
-        const env = target === 'uat' ? Environment_1.Environment.UAT : Environment_1.Environment.QA;
-        // qa promotes the freshly-built sha (1 level); uat promotes forward from :qa.
-        const source = target === 'uat' ? Environment_1.Environment.QA : this.sourceShaTag();
-        core.info(`AppRelease: promoting image to ${env} (from ${source})`);
-        await this.promoteImage(stage, env, source);
+        core.info('AppRelease: promoting image to uat (from sha)');
+        await this.promoteImage(stage, Environment_1.Environment.UAT, this.sourceShaTag());
     }
     async onPullRequest(_stage) {
         core.info('AppRelease: PR is a Trivy gate only — promotion happens after merge');
