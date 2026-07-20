@@ -230,10 +230,11 @@ class DockerECR {
         const { repo, tag: srcTag } = this.parseRef(this.fullRef(source));
         const { tag: destTag } = this.parseRef(this.fullRef(destination));
         core.info(`Promoting ECR ${repo}:${srcTag} → ${repo}:${destTag} (put-image, no layer transfer)`);
-        // PROD PROTECTION: never overwrite :prod tag with a DIFFERENT image — fail hard.
-        // Prod can only be tagged by merging to main. Re-promoting the exact same digest
-        // (e.g. a re-run, or a chained-merge release that resolves to an already-deployed
-        // build) must stay a no-op, or every re-run of a successful promotion would fail.
+        // ':prod' is a floating pointer to the latest release, same as ':qa'/':uat' —
+        // it must advance on every legitimate main merge (ECSDeployStage already deploys
+        // by immutable sha-tag, so this is a reference/audit tag, not the deploy source).
+        // Only log when it actually moves; re-promoting the same digest (re-run, or a
+        // chained-merge release resolving to an already-deployed build) is a no-op.
         const isProd = destTag === 'prod' || destTag === 'production';
         if (isProd) {
             let existingDigest = '';
@@ -259,8 +260,7 @@ class DockerECR {
                     core.info(`ECR tag ':${destTag}' already points to ${repo}:${srcTag}'s digest — promotion is a no-op ✅`);
                     return;
                 }
-                throw new Error(`🚫 BLOCKED: ECR tag ':prod' already exists in ${repo} and points to a DIFFERENT image ` +
-                    `(${existingDigest} vs ${srcDigest}). Prod images are immutable — never overwrite a prod tag.`);
+                core.info(`ECR tag ':${destTag}' moving from ${existingDigest} to ${srcDigest} (${repo}:${srcTag})`);
             }
         }
         let manifest = '';
@@ -276,17 +276,16 @@ class DockerECR {
         if (!manifest || manifest === 'None') {
             throw new Error(`ECR image not found: ${repo}:${srcTag}`);
         }
-        // For non-prod tags: delete existing tag first so ECR allows the retag.
+        // Delete existing tag first so ECR allows the retag (including ':prod', which
+        // is a floating pointer that must be able to move forward, same as ':qa'/':uat').
         // ECR throws ImageAlreadyExistsException when trying to move a mutable tag
         // to a different digest via put-image — delete + put is the reliable pattern.
-        if (!isProd) {
-            await exec.exec('aws', [
-                'ecr', 'batch-delete-image',
-                '--region', this.region, '--repository-name', repo,
-                '--image-ids', `imageTag=${destTag}`,
-            ], { ignoreReturnCode: true, silent: true });
-            core.info(`[ECR] cleared existing :${destTag} tag — retagging to new digest`);
-        }
+        await exec.exec('aws', [
+            'ecr', 'batch-delete-image',
+            '--region', this.region, '--repository-name', repo,
+            '--image-ids', `imageTag=${destTag}`,
+        ], { ignoreReturnCode: true, silent: true });
+        core.info(`[ECR] cleared existing :${destTag} tag — retagging to new digest`);
         let putOutput = '';
         const putCode = await exec.exec('aws', [
             'ecr', 'put-image',
