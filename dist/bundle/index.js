@@ -4286,6 +4286,7 @@ class PublishStage extends AbstractStage_1.AbstractStage {
                 await this.archive.moveAndPublish({ registry, image, tag: shaTag }, { registry, image, tag: snapshotTag });
                 core.info(`Tagged ${image}:${snapshotTag} — snapshot tag for lifecycle tracking`);
             }
+            await this.tagBuiltCommit(fullSHA, shaTag);
             const imageRef = this.buildImageRef(registry, image, shaTag);
             StageMessage_1.StageMessage.emit(StageMessage_1.StageOutputKey.IMAGE_TAG, shaTag);
             StageMessage_1.StageMessage.emit(StageMessage_1.StageOutputKey.IMAGE_VERSION, versionTag);
@@ -4294,6 +4295,26 @@ class PublishStage extends AbstractStage_1.AbstractStage {
         }
         finally {
             end();
+        }
+    }
+    /**
+     * Tags the exact commit that was built with `built/sha-<shortsha>`, so later
+     * promotion stages (develop/release/main, any number of merge hops later) can
+     * resolve the true build commit via `git describe --tags` instead of walking
+     * merge-commit parents — robust to squash/rebase/octopus merges and to chained
+     * merges, unlike parent-walking (see ImageSHA.resolveImageSHA doc comment).
+     * Best-effort: a failure here (e.g. tag already exists from a re-run) must not
+     * fail the publish — ImageSHA falls back to the legacy second-parent walk.
+     */
+    async tagBuiltCommit(fullSHA, shaTag) {
+        const tagName = `${ImageSHA_1.BUILD_TAG_PREFIX}${(0, ImageSHA_1.shortSHA)(fullSHA)}`;
+        try {
+            await exec.exec('git', ['tag', '-f', tagName, fullSHA], { ignoreReturnCode: true });
+            await exec.exec('git', ['push', 'origin', tagName, '--force'], { ignoreReturnCode: true });
+            core.info(`Tagged ${tagName} -> ${fullSHA} for downstream build-commit resolution`);
+        }
+        catch (err) {
+            core.warning(`Could not push build marker tag ${tagName}: ${err}`);
         }
     }
     // Identifies which built artifact corresponds to which commit, for manual
@@ -5767,23 +5788,35 @@ exports.GitVersionResolver = GitVersionResolver;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.BUILD_TAG_PREFIX = void 0;
 exports.resolveImageSHA = resolveImageSHA;
 exports.shortSHA = shortSHA;
 exports.normalizeShaTag = normalizeShaTag;
 const child_process_1 = __nccwpck_require__(35317);
+/** Git tag namespace applied by PublishStage on the exact commit it builds. */
+exports.BUILD_TAG_PREFIX = 'built/sha-';
 /**
  * Resolves the SHA of the commit that originally built the Docker image.
  *
  * GITHUB_SHA changes at every event (PR creates a simulated merge commit,
- * push-to-develop creates a new merge commit) — neither matches the feature
- * branch commit that was used to build and tag the image.
+ * push-to-develop/release/main creates a new merge commit) — neither matches
+ * the feature/hotfix commit that was actually used to build and tag the image.
+ * Walking merge-commit parents only unwraps ONE hop; a GitFlow with several
+ * chained promotions (feature→release→main) needs several hops, and parent
+ * count also silently changes with squash/rebase/octopus merges. So the source
+ * of truth is an explicit marker instead of git graph shape: PublishStage tags
+ * the built commit with `built/sha-<shortsha>` at build time (see PublishStage.ts),
+ * and any later ref resolves it via `git describe`, which walks first-parent
+ * ancestry to the nearest such tag regardless of how many merges sit in between.
  *
  * Priority:
  *   1. IMAGE_SHA env var — workflow passes ${{ github.event.pull_request.head.sha }}
  *      explicitly for pull_request events where GITHUB_SHA is wrong.
- *   2. Second parent of a merge commit — resolves the feature/hotfix tip that
- *      was merged into develop/master.
- *   3. GITHUB_SHA — correct for feature/* and hotfix/* pushes (direct commits).
+ *   2. Nearest reachable `built/sha-*` tag — resolves through any number of
+ *      chained promotion merges (requires a non-shallow checkout).
+ *   3. Second parent of a merge commit — legacy fallback for images built
+ *      before this tag was introduced, or a shallow checkout without tag history.
+ *   4. GITHUB_SHA — correct for feature/* and hotfix/* pushes (direct commits).
  */
 function resolveImageSHA() {
     if (process.env.IMAGE_SHA)
@@ -5791,8 +5824,34 @@ function resolveImageSHA() {
     const sha = process.env.GITHUB_SHA ?? '';
     if (!sha)
         return '';
+    const tagged = getNearestBuildTagSHA(sha);
+    if (tagged)
+        return tagged;
     const secondParent = getSecondParent(sha);
     return secondParent ?? sha;
+}
+/**
+ * Finds the nearest ancestor (first-parent reachable) commit carrying a
+ * `built/sha-*` tag and returns its full commit SHA. Returns null if no such
+ * tag is reachable (shallow checkout, or a commit built before this fix shipped).
+ */
+function getNearestBuildTagSHA(sha) {
+    try {
+        const tag = (0, child_process_1.execSync)(`git describe --tags --match "${exports.BUILD_TAG_PREFIX}*" --abbrev=0 ${sha}`, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'ignore'],
+        }).trim();
+        if (!tag)
+            return null;
+        const taggedSHA = (0, child_process_1.execSync)(`git rev-list -n 1 ${tag}`, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'ignore'],
+        }).trim();
+        return taggedSHA || null;
+    }
+    catch {
+        return null;
+    }
 }
 /** Returns the 7-char short form used in ECR tags (e.g. "sha-4f9c21a"). */
 function shortSHA(fullSHA) {
@@ -143066,24 +143125,6 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
-
-/***/ }),
-
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -153410,132 +153451,6 @@ exports.listType = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156751,6 +156666,132 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156821,6 +156862,24 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
+
+/***/ }),
+
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
