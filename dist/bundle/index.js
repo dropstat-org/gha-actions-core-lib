@@ -2824,10 +2824,15 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // chain is the only reliable evidence of promotion.
         // Hotfix is the deliberate exception: it builds its own image and ships
         // straight to prod (AppRelease promotes hotfix sha → :prod, skipping uat).
+        // FORCE_BUILD_OVERRIDE is the other deliberate exception: same opt-in signal
+        // used by AppWorkflow to compile+publish directly on release/**, so an image
+        // built that way has no :qa tag by design — the override already asserts the
+        // caller knowingly bypassed the normal qa promotion for this push.
         const requiredPriorTag = REQUIRED_PRIOR_TAG[effectiveEnv];
         const isHotfixToProd = this.branchType === BranchType_1.BranchType.HOTFIX && effectiveEnv === Environment_1.Environment.PROD;
         if (requiredPriorTag && imageBase && !isHotfixToProd
-            && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true') {
+            && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true'
+            && process.env.FORCE_BUILD_OVERRIDE !== 'true') {
             await this.verifyPromotion(imageBase, imageTag, region, requiredPriorTag, effectiveEnv, ecr);
         }
         // ── 3. Register new task definition revision ──────────────────────────────
