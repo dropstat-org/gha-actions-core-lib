@@ -8536,7 +8536,11 @@ class AppWorkflow extends Workflow_1.Workflow {
                 // Normally scan the already-built image and promote it (build-once).
                 // FORCE_BUILD_OVERRIDE opts a specific push into building here too —
                 // for a release-tip commit with no built image yet (see constructor note).
-                return this.forceBuildOverride ? [...BUILD_STAGES, ...PROMOTE_STAGES] : PROMOTE_STAGES;
+                // PROMOTE_STAGES' own leading trivy is dropped: BUILD_STAGES already
+                // scans before publish, and checkOrder() rejects a repeated stage name.
+                return this.forceBuildOverride
+                    ? [...BUILD_STAGES, ...PROMOTE_STAGES.filter(s => s.name !== StageName_1.StageName.TRIVY)]
+                    : PROMOTE_STAGES;
             case BranchType_1.BranchType.DEVELOP:
             case BranchType_1.BranchType.MASTER:
                 // Scan the already-built image then promote to the env tag.
