@@ -39,6 +39,11 @@ on:
         type: string
         required: false
         default: ""
+      force_build:
+        description: "Same opt-in signal as pipeline-ci.yml's force_build: the image being deployed was compiled+published directly on release/** (no :qa tag by design), so ECSDeployStage's qa-promotion gate should not block it. Default false preserves the gate for every other repo/branch."
+        type: boolean
+        required: false
+        default: false
       runner:
         description: "Runner label(s) — defaults to ubuntu-latest. Pass a JSON array string for self-hosted (e.g. '[\"self-hosted\",\"aws\",\"dropstat\"]')."
         type: string
@@ -386,6 +391,7 @@ jobs:
           # Opt-in per repo: bypass the prod-account guard (test repos that deploy
           # prod->dev). Empty for normal repos, so the guard stays on.
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
+          FORCE_BUILD_OVERRIDE: ${{ inputs.force_build }}
 
   # ── S3 Deploy: static frontend (S3 sync + CloudFront invalidation) ───────────
   # Build-once: downloads the dist artifact built in CI and syncs it to the env's
