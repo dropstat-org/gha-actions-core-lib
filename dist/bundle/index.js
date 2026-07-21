@@ -310,12 +310,15 @@ class DockerECR {
     async checkFile(imageRef) {
         await this.ensureRegistry();
         const { repo, tag } = this.parseRef(this.fullRef(imageRef));
+        // silent: a missing tag is the expected, common outcome here (build-once
+        // checks this before publishing) — the CLI's raw ImageNotFoundException
+        // stderr would otherwise surface as a red error line even though it's not one.
         const code = await exec.exec('aws', [
             'ecr', 'describe-images',
             '--region', this.region,
             '--repository-name', repo,
             '--image-ids', `imageTag=${tag}`,
-        ], { ignoreReturnCode: true });
+        ], { ignoreReturnCode: true, silent: true });
         return code === 0;
     }
     fullRef(ref) {
