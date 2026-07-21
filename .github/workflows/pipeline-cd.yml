@@ -365,6 +365,12 @@ jobs:
           stage: ecs_deploy
         env:
           PIPELINE_REF: ${{ needs.config.outputs.resolved_ref || inputs.deploy_ref }}
+          # The config job already resolved the final target env (override-or-branch) —
+          # forward it here so ECSDeployStage doesn't re-derive effectiveEnv from branch
+          # alone in this separate job, where DEPLOY_ENVIRONMENT_OVERRIDE would otherwise
+          # be empty and silently fall back to branch routing (e.g. main -> prod even
+          # when a workflow_dispatch explicitly selected 'qa').
+          DEPLOY_ENVIRONMENT_OVERRIDE: ${{ needs.config.outputs.deploy_environment }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
@@ -417,6 +423,11 @@ jobs:
           stage: s3_deploy
         env:
           PIPELINE_REF: ${{ needs.config.outputs.resolved_ref || inputs.deploy_ref }}
+          # See the same env var in the ecs_deploy job above: this job re-derives its
+          # own effectiveEnv independently, so the config job's resolved env (override-
+          # or-branch) must be forwarded explicitly or a workflow_dispatch override is
+          # silently lost and S3DeployStage falls back to branch routing.
+          DEPLOY_ENVIRONMENT_OVERRIDE: ${{ needs.config.outputs.deploy_environment }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
           # Empty = auto-pick latest CI dist; set = pin to that CI run (rollback).
