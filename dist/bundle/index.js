@@ -3260,14 +3260,23 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // object keeps whatever ACL it already had (a redeploy of identical content would
         // leave previously-private objects private → AccessDenied). Re-apply the ACL to
         // every object in place so the whole site is consistently public.
-        // metadata-directive stays COPY (the default) - REPLACE would require re-specifying
-        // every metadata field (content-type, cache-control, ...) and dropped ones silently
-        // reset to binary/octet-stream, which broke rendering (browser downloads instead of
-        // displaying index.html).
+        // Uses put-object-acl (not `s3 cp`) - S3 rejects a same-key CopyObject that only
+        // changes the ACL ("illegal ... without changing metadata, storage class, ...").
+        // A prior version worked around that with --metadata-directive REPLACE, which
+        // "worked" but silently reset every object's content-type to binary/octet-stream
+        // (no per-file --content-type was given), breaking rendering - browsers downloaded
+        // index.html instead of displaying it. put-object-acl changes only the ACL.
         if (acl) {
-            const aclArgs = ['s3', 'cp', `s3://${bucket}/`, `s3://${bucket}/`,
-                '--recursive', '--acl', acl, '--region', region];
-            await exec.exec('aws', aclArgs);
+            let listOutput = '';
+            await exec.exec('aws', ['s3api', 'list-objects-v2', '--bucket', bucket, '--region', region,
+                '--query', 'Contents[].Key', '--output', 'text'], {
+                listeners: { stdout: (data) => { listOutput += data.toString(); } },
+            });
+            const keys = listOutput.split(/\s+/).map(k => k.trim()).filter(Boolean);
+            for (const key of keys) {
+                await exec.exec('aws', ['s3api', 'put-object-acl', '--bucket', bucket, '--key', key,
+                    '--acl', acl, '--region', region]);
+            }
         }
         // Re-upload config.js with no-cache: the sync above stored it with the default
         // (or global cache_control) policy, but config must never be cached hard — a
