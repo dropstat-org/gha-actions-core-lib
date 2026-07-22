@@ -3282,9 +3282,15 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 keys.push(...(parsed.Keys ?? []));
                 continuationToken = parsed.Token ?? undefined;
             } while (continuationToken);
-            for (const key of keys) {
-                await exec.exec('aws', ['s3api', 'put-object-acl', '--bucket', bucket, '--key', key,
-                    '--acl', acl, '--region', region]);
+            // Run in bounded-concurrency batches — legacy buckets like dropstat-scheduler
+            // hold thousands of objects; awaiting one put-object-acl call at a time turned
+            // this pass into the long pole of the whole deploy (~15min). AWS CLI default
+            // connection pool is 10, so cap batches there to avoid throttling/connection errors.
+            const CONCURRENCY = 10;
+            for (let i = 0; i < keys.length; i += CONCURRENCY) {
+                const batch = keys.slice(i, i + CONCURRENCY);
+                await Promise.all(batch.map(key => exec.exec('aws', ['s3api', 'put-object-acl', '--bucket', bucket, '--key', key,
+                    '--acl', acl, '--region', region])));
             }
         }
         // Re-upload config.js with no-cache: the sync above stored it with the default
