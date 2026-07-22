@@ -310,15 +310,12 @@ class DockerECR {
     async checkFile(imageRef) {
         await this.ensureRegistry();
         const { repo, tag } = this.parseRef(this.fullRef(imageRef));
-        // silent: a missing tag is the expected, common outcome here (build-once
-        // checks this before publishing) — the CLI's raw ImageNotFoundException
-        // stderr would otherwise surface as a red error line even though it's not one.
         const code = await exec.exec('aws', [
             'ecr', 'describe-images',
             '--region', this.region,
             '--repository-name', repo,
             '--image-ids', `imageTag=${tag}`,
-        ], { ignoreReturnCode: true, silent: true });
+        ], { ignoreReturnCode: true });
         return code === 0;
     }
     fullRef(ref) {
@@ -2827,15 +2824,10 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // chain is the only reliable evidence of promotion.
         // Hotfix is the deliberate exception: it builds its own image and ships
         // straight to prod (AppRelease promotes hotfix sha → :prod, skipping uat).
-        // FORCE_BUILD_OVERRIDE is the other deliberate exception: same opt-in signal
-        // used by AppWorkflow to compile+publish directly on release/**, so an image
-        // built that way has no :qa tag by design — the override already asserts the
-        // caller knowingly bypassed the normal qa promotion for this push.
         const requiredPriorTag = REQUIRED_PRIOR_TAG[effectiveEnv];
         const isHotfixToProd = this.branchType === BranchType_1.BranchType.HOTFIX && effectiveEnv === Environment_1.Environment.PROD;
         if (requiredPriorTag && imageBase && !isHotfixToProd
-            && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true'
-            && process.env.FORCE_BUILD_OVERRIDE !== 'true') {
+            && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true') {
             await this.verifyPromotion(imageBase, imageTag, region, requiredPriorTag, effectiveEnv, ecr);
         }
         // ── 3. Register new task definition revision ──────────────────────────────
@@ -3268,11 +3260,13 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // object keeps whatever ACL it already had (a redeploy of identical content would
         // leave previously-private objects private → AccessDenied). Re-apply the ACL to
         // every object in place so the whole site is consistently public.
+        // metadata-directive stays COPY (the default) - REPLACE would require re-specifying
+        // every metadata field (content-type, cache-control, ...) and dropped ones silently
+        // reset to binary/octet-stream, which broke rendering (browser downloads instead of
+        // displaying index.html).
         if (acl) {
             const aclArgs = ['s3', 'cp', `s3://${bucket}/`, `s3://${bucket}/`,
-                '--recursive', '--acl', acl, '--metadata-directive', 'REPLACE', '--region', region];
-            if (cacheControl)
-                aclArgs.push('--cache-control', cacheControl);
+                '--recursive', '--acl', acl, '--region', region];
             await exec.exec('aws', aclArgs);
         }
         // Re-upload config.js with no-cache: the sync above stored it with the default
@@ -8509,16 +8503,9 @@ class AppWorkflow extends Workflow_1.Workflow {
      * Trunk:   feature/* → main (short-lived branches, no develop/release/hotfix).
      */
     strategy;
-    // Same pattern as DEPLOY_ENVIRONMENT_OVERRIDE: an explicit, opt-in override
-    // beats the branch-derived default instead of changing it globally. Unset
-    // (default false) preserves build-once for every repo/branch; a caller can
-    // set FORCE_BUILD_OVERRIDE=true on its own release/** push to compile+publish
-    // when the branch tip has no built image yet (e.g. a direct commit).
-    forceBuildOverride;
     constructor() {
         super();
         this.strategy = process.env.BRANCHING_STRATEGY ?? 'gitflow';
-        this.forceBuildOverride = process.env.FORCE_BUILD_OVERRIDE === 'true';
     }
     stagesConfig(branchType) {
         return this.strategy === 'trunk'
@@ -8540,16 +8527,8 @@ class AppWorkflow extends Workflow_1.Workflow {
                 // push (build-once). The PR only needs review; the required CI workflow
                 // runs the library, which skips every stage here (fast no-op gate).
                 return [];
-            case BranchType_1.BranchType.RELEASE:
-                // Normally scan the already-built image and promote it (build-once).
-                // FORCE_BUILD_OVERRIDE opts a specific push into building here too —
-                // for a release-tip commit with no built image yet (see constructor note).
-                // PROMOTE_STAGES' own leading trivy is dropped: BUILD_STAGES already
-                // scans before publish, and checkOrder() rejects a repeated stage name.
-                return this.forceBuildOverride
-                    ? [...BUILD_STAGES, ...PROMOTE_STAGES.filter(s => s.name !== StageName_1.StageName.TRIVY)]
-                    : PROMOTE_STAGES;
             case BranchType_1.BranchType.DEVELOP:
+            case BranchType_1.BranchType.RELEASE:
             case BranchType_1.BranchType.MASTER:
                 // Scan the already-built image then promote to the env tag.
                 return PROMOTE_STAGES;
@@ -143266,24 +143245,6 @@ exports.StorageContextClient = StorageContextClient;
 
 /***/ }),
 
-/***/ 83627:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.KnownEncryptionAlgorithmType = void 0;
-/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
-var KnownEncryptionAlgorithmType;
-(function (KnownEncryptionAlgorithmType) {
-    KnownEncryptionAlgorithmType["AES256"] = "AES256";
-})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
-//# sourceMappingURL=generatedModels.js.map
-
-/***/ }),
-
 /***/ 30247:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -153610,132 +153571,6 @@ exports.listType = {
 
 /***/ }),
 
-/***/ 56635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=appendBlob.js.map
-
-/***/ }),
-
-/***/ 68355:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blob.js.map
-
-/***/ }),
-
-/***/ 17188:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=blockBlob.js.map
-
-/***/ }),
-
-/***/ 15337:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=container.js.map
-
-/***/ }),
-
-/***/ 82354:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const tslib_1 = __nccwpck_require__(61860);
-tslib_1.__exportStar(__nccwpck_require__(26865), exports);
-tslib_1.__exportStar(__nccwpck_require__(15337), exports);
-tslib_1.__exportStar(__nccwpck_require__(68355), exports);
-tslib_1.__exportStar(__nccwpck_require__(14400), exports);
-tslib_1.__exportStar(__nccwpck_require__(56635), exports);
-tslib_1.__exportStar(__nccwpck_require__(17188), exports);
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 14400:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=pageBlob.js.map
-
-/***/ }),
-
-/***/ 26865:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- *
- * Code generated by Microsoft (R) AutoRest Code Generator.
- * Changes may cause incorrect behavior and will be lost if the code is regenerated.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-//# sourceMappingURL=service.js.map
-
-/***/ }),
-
 /***/ 40535:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -156951,6 +156786,132 @@ const filterBlobsOperationSpec = {
 
 /***/ }),
 
+/***/ 56635:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=appendBlob.js.map
+
+/***/ }),
+
+/***/ 68355:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blob.js.map
+
+/***/ }),
+
+/***/ 17188:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=blockBlob.js.map
+
+/***/ }),
+
+/***/ 15337:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=container.js.map
+
+/***/ }),
+
+/***/ 82354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const tslib_1 = __nccwpck_require__(61860);
+tslib_1.__exportStar(__nccwpck_require__(26865), exports);
+tslib_1.__exportStar(__nccwpck_require__(15337), exports);
+tslib_1.__exportStar(__nccwpck_require__(68355), exports);
+tslib_1.__exportStar(__nccwpck_require__(14400), exports);
+tslib_1.__exportStar(__nccwpck_require__(56635), exports);
+tslib_1.__exportStar(__nccwpck_require__(17188), exports);
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 14400:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=pageBlob.js.map
+
+/***/ }),
+
+/***/ 26865:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ *
+ * Code generated by Microsoft (R) AutoRest Code Generator.
+ * Changes may cause incorrect behavior and will be lost if the code is regenerated.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+//# sourceMappingURL=service.js.map
+
+/***/ }),
+
 /***/ 5313:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -157021,6 +156982,24 @@ class StorageClient extends coreHttpCompat.ExtendedServiceClient {
 }
 exports.StorageClient = StorageClient;
 //# sourceMappingURL=storageClient.js.map
+
+/***/ }),
+
+/***/ 83627:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.KnownEncryptionAlgorithmType = void 0;
+/** Known values of {@link EncryptionAlgorithmType} that the service accepts. */
+var KnownEncryptionAlgorithmType;
+(function (KnownEncryptionAlgorithmType) {
+    KnownEncryptionAlgorithmType["AES256"] = "AES256";
+})(KnownEncryptionAlgorithmType || (exports.KnownEncryptionAlgorithmType = KnownEncryptionAlgorithmType = {}));
+//# sourceMappingURL=generatedModels.js.map
 
 /***/ }),
 
