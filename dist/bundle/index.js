@@ -8503,6 +8503,18 @@ const FEATURE_STAGES = [
     { name: StageName_1.StageName.ECS_DEPLOY, required: false },
     { name: StageName_1.StageName.S3_DEPLOY, required: false },
 ];
+// Opt-in escape hatch for release/** branches that are pushed to directly
+// (no feature/hotfix branch built the sha first) — e.g. a dedicated
+// release/uat-gha branch used as a standing deploy target. Normally
+// PROMOTE_STAGES assumes the image/dist for this sha was already built on a
+// feature/hotfix branch; FORCE_BUILD_OVERRIDE=true unions in BUILD_STAGES so
+// this exact sha gets compiled+published(+trivy-scanned) before promoting.
+const FORCE_BUILD_STAGES = [
+    ...BUILD_STAGES,
+    { name: StageName_1.StageName.RELEASE, required: false },
+    { name: StageName_1.StageName.ECS_DEPLOY, required: false },
+    { name: StageName_1.StageName.S3_DEPLOY, required: false },
+];
 // Hotfix needs BUILD_STAGES for CI (build + publish sha-xxx) and PROMOTE_STAGES for CD
 // (promote sha-xxx → :prod + deploy). The PIPELINE_PHASE filter splits them:
 //   phase=ci → HOTFIX_STAGES − CI_DENY = BUILD_STAGES
@@ -8545,8 +8557,14 @@ class AppWorkflow extends Workflow_1.Workflow {
                 // push (build-once). The PR only needs review; the required CI workflow
                 // runs the library, which skips every stage here (fast no-op gate).
                 return [];
-            case BranchType_1.BranchType.DEVELOP:
             case BranchType_1.BranchType.RELEASE:
+                // See FORCE_BUILD_STAGES above — direct pushes to a standing release/**
+                // deploy branch (no prior feature/hotfix build for this sha) opt in via
+                // FORCE_BUILD_OVERRIDE=true to compile+publish before promoting.
+                return (process.env.FORCE_BUILD_OVERRIDE ?? '').toLowerCase() === 'true'
+                    ? FORCE_BUILD_STAGES
+                    : PROMOTE_STAGES;
+            case BranchType_1.BranchType.DEVELOP:
             case BranchType_1.BranchType.MASTER:
                 // Scan the already-built image then promote to the env tag.
                 return PROMOTE_STAGES;
