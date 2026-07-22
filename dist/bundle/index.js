@@ -3267,12 +3267,21 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // (no per-file --content-type was given), breaking rendering - browsers downloaded
         // index.html instead of displaying it. put-object-acl changes only the ACL.
         if (acl) {
-            let listOutput = '';
-            await exec.exec('aws', ['s3api', 'list-objects-v2', '--bucket', bucket, '--region', region,
-                '--query', 'Contents[].Key', '--output', 'text'], {
-                listeners: { stdout: (data) => { listOutput += data.toString(); } },
-            });
-            const keys = listOutput.split(/\s+/).map(k => k.trim()).filter(Boolean);
+            const keys = [];
+            let continuationToken;
+            do {
+                let listOutput = '';
+                const listArgs = ['s3api', 'list-objects-v2', '--bucket', bucket, '--region', region,
+                    '--query', '{Keys:Contents[].Key,Token:NextContinuationToken}', '--output', 'json'];
+                if (continuationToken)
+                    listArgs.push('--starting-token', continuationToken);
+                await exec.exec('aws', listArgs, {
+                    listeners: { stdout: (data) => { listOutput += data.toString(); } },
+                });
+                const parsed = JSON.parse(listOutput);
+                keys.push(...(parsed.Keys ?? []));
+                continuationToken = parsed.Token ?? undefined;
+            } while (continuationToken);
             for (const key of keys) {
                 await exec.exec('aws', ['s3api', 'put-object-acl', '--bucket', bucket, '--key', key,
                     '--acl', acl, '--region', region]);
