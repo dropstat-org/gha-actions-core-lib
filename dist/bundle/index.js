@@ -1919,6 +1919,23 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     _effectiveTools(_stage) {
         return undefined;
     }
+    /**
+     * Resolves soft-fail mode for this run.
+     * Priority: stage config > softFailPattern match > platform policy.
+     * Mirrors CheckovTfStage.resolveSoftFail.
+     */
+    resolveSoftFail(stage, platformSoftFail) {
+        if (stage.trivy?.softFail !== undefined)
+            return stage.trivy.softFail;
+        if (stage.trivy?.softFailPattern) {
+            const re = new RegExp(stage.trivy.softFailPattern, 'i');
+            if (re.test(this.config.metadata.projectId) ||
+                re.test(this.config.metadata.serviceId)) {
+                return true;
+            }
+        }
+        return platformSoftFail;
+    }
     async install(version) {
         // Skip download if the correct version is already installed (e.g. pre-baked in AMI).
         const existing = await exec.getExecOutput('trivy', ['--version'], { ignoreReturnCode: true, silent: true });
@@ -1955,8 +1972,10 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     async run(stage) {
         const end = this.startGroup(`trivy: ${stage.name}`);
         try {
-            const { severity: SEVERITY, soft_fail: SOFT_FAIL, upload_sarif: UPLOAD_SARIF } = (await PlatformConfigLoader_1.PlatformConfigLoader.securityPolicy()).trivy;
+            const { severity: SEVERITY, soft_fail: PLATFORM_SOFT_FAIL, upload_sarif: UPLOAD_SARIF } = (await PlatformConfigLoader_1.PlatformConfigLoader.securityPolicy()).trivy;
             const { trivy: trivyVersion } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
+            // action.yaml softFail/softFailPattern overrides platform config when set
+            const SOFT_FAIL = this.resolveSoftFail(stage, PLATFORM_SOFT_FAIL);
             await this.install(trivyVersion);
             // ── Load per-project exceptions from dso-trivy repo ──────────────────────
             // Branch: release/{projectId}  File: .trivyignore
