@@ -2615,6 +2615,8 @@ const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const DeploySummary_1 = __nccwpck_require__(54086);
 const ImageSHA_1 = __nccwpck_require__(2870);
+const SecurityConfigLoader_1 = __nccwpck_require__(76560);
+const Env_1 = __nccwpck_require__(45188);
 // Account IDs that are expected per environment.
 // Same-account environments (uat + prod both in management) rely on deploy.yaml
 // mapping the correct role — account check catches cross-account mistakes only.
@@ -2852,7 +2854,10 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // straight to prod (AppRelease promotes hotfix sha → :prod, skipping uat).
         const requiredPriorTag = REQUIRED_PRIOR_TAG[effectiveEnv];
         const isHotfixToProd = this.branchType === BranchType_1.BranchType.HOTFIX && effectiveEnv === Environment_1.Environment.PROD;
-        if (requiredPriorTag && imageBase && !isHotfixToProd
+        const isExemptBranch = requiredPriorTag
+            ? await this.isBranchExemptFromGate(projectId, serviceId)
+            : false;
+        if (requiredPriorTag && imageBase && !isHotfixToProd && !isExemptBranch
             && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true') {
             await this.verifyPromotion(imageBase, imageTag, region, requiredPriorTag, effectiveEnv, ecr);
         }
@@ -3032,6 +3037,28 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 `Deploy through the normal pipeline to '${requiredTag}' first, or target '${requiredTag}' instead.`);
         }
         core.info(`   Promotion verified: ${repo}:${shaTag} already carries ':${requiredTag}' → manual deploy to ${targetEnv} allowed`);
+    }
+    /**
+     * Centrally-managed exception to the promotion gate, mirroring the dso-trivy/
+     * dso-checkov/dso-semgrep pattern: dropstat-org/dso-deploy-gate holds a
+     * release/{projectId}-{serviceId} branch per service with exempt-branches.txt
+     * listing branches allowed to skip REQUIRED_PRIOR_TAG (e.g. a test branch built
+     * and shipped straight from release/uat-gha without going through :qa first).
+     * Missing repo/branch/file is never an error — the gate runs as normal.
+     */
+    async isBranchExemptFromGate(projectId, serviceId) {
+        if (!projectId || !serviceId)
+            return false;
+        const content = await SecurityConfigLoader_1.SecurityConfigLoader.fetchDeployGateConfig(projectId, serviceId);
+        if (!content)
+            return false;
+        const exemptBranches = SecurityConfigLoader_1.SecurityConfigLoader.parseDeployGateConfig(content);
+        const currentBranch = Env_1.Env.refName();
+        const exempt = exemptBranches.includes(currentBranch);
+        if (exempt) {
+            core.info(`   Promotion gate exempted: branch '${currentBranch}' listed in dso-deploy-gate for ${projectId}-${serviceId}`);
+        }
+        return exempt;
     }
     async assumeRole(roleArn, sessionName) {
         let json = '';
@@ -7336,6 +7363,20 @@ class SecurityConfigLoader {
     }
     static async fetchSemgrepIgnore(projectId, serviceId) {
         return this.fetch('dso-semgrep', projectId, serviceId, '.semgrepignore');
+    }
+    static async fetchDeployGateConfig(projectId, serviceId) {
+        return this.fetch('dso-deploy-gate', projectId, serviceId, 'exempt-branches.txt');
+    }
+    /**
+     * Parses exempt-branches.txt: one branch name (or exact ref) per line, exempting
+     * it from the ECSDeployStage promotion gate (REQUIRED_PRIOR_TAG check).
+     * Comments (#) and blank lines are ignored.
+     */
+    static parseDeployGateConfig(content) {
+        return content
+            .split('\n')
+            .map(raw => raw.split('#')[0].trim())
+            .filter(line => line.length > 0);
     }
     static writeTempConfig(content, filename) {
         const path = `/tmp/${filename}`;
