@@ -1974,8 +1974,6 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
         try {
             const { severity: SEVERITY, soft_fail: PLATFORM_SOFT_FAIL, upload_sarif: UPLOAD_SARIF } = (await PlatformConfigLoader_1.PlatformConfigLoader.securityPolicy()).trivy;
             const { trivy: trivyVersion } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
-            // action.yaml softFail/softFailPattern overrides platform config when set
-            const SOFT_FAIL = this.resolveSoftFail(stage, PLATFORM_SOFT_FAIL);
             await this.install(trivyVersion);
             // ── Load per-project exceptions from dso-trivy repo ──────────────────────
             // Branch: release/{projectId}  File: .trivyignore
@@ -1984,8 +1982,10 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             // All excepted issues remain visible in the report (--show-suppressed) but don't fail.
             const trivyIgnoreContent = await SecurityConfigLoader_1.SecurityConfigLoader.fetchTrivyIgnore(this.config.metadata.projectId, this.config.metadata.serviceId);
             const skipFiles = [];
+            let dsoSoftFail;
             if (trivyIgnoreContent) {
-                const { cveLines, skipFiles: paths } = SecurityConfigLoader_1.SecurityConfigLoader.parseTrivyIgnore(trivyIgnoreContent);
+                const { cveLines, skipFiles: paths, softFail } = SecurityConfigLoader_1.SecurityConfigLoader.parseTrivyIgnore(trivyIgnoreContent);
+                dsoSoftFail = softFail;
                 if (cveLines.length > 0) {
                     (__nccwpck_require__(79896).writeFileSync)('.trivyignore', cveLines.join('\n'), 'utf8');
                     core.info(`[Trivy] ${cveLines.length} CVE exception(s) applied from dso-trivy`);
@@ -1994,7 +1994,14 @@ class TrivyStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
                     skipFiles.push(...paths);
                     core.info(`[Trivy] ${paths.length} file path exception(s) applied: ${paths.join(', ')}`);
                 }
+                if (dsoSoftFail !== undefined) {
+                    core.info(`[Trivy] soft_fail=${dsoSoftFail} directive applied from dso-trivy`);
+                }
             }
+            // Priority: action.yaml explicit > dso-trivy .trivyignore directive > softFailPattern > platform policy
+            const SOFT_FAIL = stage.trivy?.softFail !== undefined
+                ? stage.trivy.softFail
+                : this.resolveSoftFail(stage, dsoSoftFail !== undefined ? dsoSoftFail : PLATFORM_SOFT_FAIL);
             let scanType = stage.trivy?.scanType ?? 'fs';
             let imageRef = stage.trivy?.imageRef;
             let localShaTag;
@@ -7303,7 +7310,14 @@ class SecurityConfigLoader {
     static parseTrivyIgnore(content) {
         const cveLines = [];
         const skipFiles = [];
+        let softFail;
         for (const raw of content.split('\n')) {
+            // directive comments, e.g. "# soft_fail: true" — checked before stripping comments
+            const directive = raw.trim().match(/^#\s*soft_fail:\s*(true|false)\s*$/i);
+            if (directive) {
+                softFail = directive[1].toLowerCase() === 'true';
+                continue;
+            }
             const line = raw.split('#')[0].trim(); // strip comments
             if (!line)
                 continue;
@@ -7315,7 +7329,7 @@ class SecurityConfigLoader {
                 skipFiles.push(line);
             }
         }
-        return { cveLines, skipFiles };
+        return { cveLines, skipFiles, softFail };
     }
     static async fetchCheckovConfig(projectId, serviceId) {
         return this.fetch('dso-checkov', projectId, serviceId, 'checkov.yaml');
