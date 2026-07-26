@@ -7,7 +7,7 @@ name: Pipeline CD
 # The library's config stage runs with PIPELINE_PHASE=cd, which intersects the
 # branch-allowed stages with the CD set and derives deploy_environment from the
 # branch (develop→dev, release/*→qa, master/main→prod). The GitHub `environment:`
-# gate provides the approval step + scoped ECS_DEPLOY_ROLE secret per environment.
+# gate provides the approval step + scoped ECS_DEPLOY_ROLE var per environment.
 #
 # Image promotion rules (unchanged, enforced by AppRelease / ECSDeployStage):
 #   develop→:dev  release/*→:qa  master/main→:prod (prod only from master/main).
@@ -379,14 +379,16 @@ jobs:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
-          ECS_DEPLOY_ROLE: ${{ secrets.ECS_DEPLOY_ROLE }}
+          ECS_DEPLOY_ROLE: ${{ vars.ECS_DEPLOY_ROLE }}
           # Lets action.yaml's ecs_deploy block use $ECS_CLUSTER/$ECS_SERVICE/$ECS_CONTAINER
           # (ECSDeployStage.resolve()) — dropped from this job when ecs_deploy_qa was
           # removed in ad52feb; this is now the only job serving dev+qa, so it needs them.
-          ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
-          ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
-          ECS_CONTAINER: ${{ secrets.ECS_CONTAINER }}
-          ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
+          # Not real secrets (infra identifiers, readable via `aws ecs describe-services`);
+          # sourced from GitHub Actions vars, not secrets.
+          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+          ECS_CONTAINER: ${{ vars.ECS_CONTAINER }}
+          ECS_TASK_DEFINITION: ${{ vars.ECS_TASK_DEFINITION }}
           SHA_TAG: ${{ inputs.sha_tag }}
           # Opt-in per repo: bypass the prod-account guard (test repos that deploy
           # prod->dev). Empty for normal repos, so the guard stays on.

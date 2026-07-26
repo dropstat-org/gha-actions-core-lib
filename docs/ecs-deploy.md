@@ -35,7 +35,7 @@ stages:
 | `ECR_REGISTRY` | Org var | Registry URL completo |
 | `ECR_IMAGE_ORG` | Org var | Prefijo org en ECR (e.g. `dropstat`) |
 | `AWS_ROLE_ARN` | Org secret | Role OIDC con permisos ECR |
-| `ECS_DEPLOY_ROLE` | Env secret | Role con permisos ECS en cuenta destino |
+| `ECS_DEPLOY_ROLE` | Env var | Role con permisos ECS en cuenta destino (no es secreto: ARN visible via `aws ecs describe-services`) |
 
 ## image_tag resolution
 
