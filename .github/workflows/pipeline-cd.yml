@@ -438,6 +438,13 @@ jobs:
           DEPLOY_ENVIRONMENT_OVERRIDE: ${{ needs.config.outputs.deploy_environment }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-2' }}
+          # Lets action.yaml's s3_deploy block use $S3_BUCKET/$CF_DISTRIBUTION_ID/$S3_ACL
+          # (S3DeployStage.resolve()) instead of deploy.yaml — sourced from GitHub
+          # Environment vars, scoped per env by the job's `environment:` gate above.
+          # Not secrets (bucket/distribution names, readable via `aws s3api`/`aws cloudfront`).
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          CF_DISTRIBUTION_ID: ${{ vars.CF_DISTRIBUTION_ID }}
+          S3_ACL: ${{ vars.S3_ACL }}
           # Empty = auto-pick latest CI dist; set = pin to that CI run (rollback).
           DEPLOY_ARTIFACT_RUN_ID: ${{ inputs.run_id }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
