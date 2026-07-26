@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-CD-plan
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-CD-deploy
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}

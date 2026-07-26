@@ -250,7 +250,7 @@ jobs:
       - name: Setup AWS credentials (ECR push)
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-ci-publish
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
@@ -292,7 +292,7 @@ jobs:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-ci-plan
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}

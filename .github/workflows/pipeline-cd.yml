@@ -158,7 +158,7 @@ jobs:
           fetch-depth: 0
       - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-cd-plan
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
@@ -313,7 +313,7 @@ jobs:
       - name: Setup AWS (+ Terraform)
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-cd-deploy
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
@@ -360,7 +360,7 @@ jobs:
       - name: Setup AWS credentials
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-cd-ecs-deploy
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
@@ -421,7 +421,7 @@ jobs:
       - name: Setup AWS credentials
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-cd-s3-deploy
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
@@ -476,7 +476,7 @@ jobs:
         if: needs.config.outputs.ActionsCoreLib_type != 'terraform'
         uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-terraform@main
         with:
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           session-name: GitHubActions-cd-release
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}

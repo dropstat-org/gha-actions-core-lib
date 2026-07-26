@@ -36,7 +36,7 @@ La lib lo trata como éxito — el CD pipeline puede correr múltiples veces con
 | `SHA_TAG` | `inputs.sha_tag` | sha a promover (e.g. `sha-052c920`) |
 | `ECR_REGISTRY` | Org var | Registry URL |
 | `ECR_IMAGE_ORG` | Org var | Prefijo org (`dropstat`) |
-| `AWS_ROLE_ARN` | Org secret | Role con permisos ECR |
+| `AWS_ROLE_ARN` | Repo/env var (fallback: secret) | Role con permisos ECR. No es secreto; `vars` tiene prioridad, `secrets` queda como fallback mientras se migran los repos restantes |
 
 ## ECS Exec — debugging
 
