@@ -59,17 +59,20 @@ on:
         default: ""
 
 # See the note in pipeline-ci.yml: the caller must grant every permission any job of
-# the reusable workflow declares, or the run dies as startup_failure.
-#   issues: write        → the manual approval gate opens an issue
-#   pull-requests: read  → approval/ownership checks
+# the reusable workflow declares, or the run dies as startup_failure. This is the
+# EXACT superset the CD reusable declares — nothing more (least privilege), nothing
+# less. Note it differs from CI: CD needs `issues: write` (the manual approval gate
+# opens an issue) but does NOT need `security-events`, and `actions` is read-only
+# here because CD dispatches nothing.
+#
+# To recompute after changing the reusable, take the union of every job's
+# `permissions:` block in gha-actions-core-lib/.github/workflows/pipeline-cd.yml.
 permissions:
-  id-token:        write
-  contents:        write
-  packages:        write
-  security-events: write
-  actions:         read
-  issues:          write
-  pull-requests:   read
+  id-token: write
+  contents: write
+  packages: write
+  actions:  read
+  issues:   write
 
 jobs:
   cd:

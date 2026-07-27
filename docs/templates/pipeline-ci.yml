@@ -12,6 +12,10 @@
 #   packages: write  → publish stage (ECR/GHCR)
 #   actions:  write  → the "Trigger CD" job, which dispatches pipeline-cd
 # `actions: read` is NOT enough for Trigger CD — it needs write to dispatch.
+#
+# This block is the EXACT superset the CI reusable declares. To recompute after
+# changing it, take the union of every job's `permissions:` block in
+# gha-actions-core-lib/.github/workflows/pipeline-ci.yml.
 
 name: Pipeline CI
 
