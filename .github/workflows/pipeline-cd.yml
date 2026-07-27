@@ -452,6 +452,7 @@ jobs:
           # (github-org repo_env_vars / repo_env_config.tf), scoped per env by the
           # job's `environment:` gate above. An unset $VAR fails the deploy rather
           # than shipping the literal placeholder to browsers.
+          APP_ENV: ${{ vars.APP_ENV }}
           APP_API_BASE_URL: ${{ vars.APP_API_BASE_URL }}
           APP_API_PROTOCOL: ${{ vars.APP_API_PROTOCOL }}
           APP_ENCRYPTION_KEY: ${{ secrets.APP_ENCRYPTION_KEY }}
