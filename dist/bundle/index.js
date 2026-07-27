@@ -3498,8 +3498,10 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 const fromEnv = process.env[varName];
                 if (fromEnv === undefined || fromEnv === '') {
                     throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy.runtime_config.${key}: variable '${varName}' is not set for environment `
-                        + `'${env}'. Define it as a GitHub Environment variable (managed in github-org `
-                        + `Terraform) or set the value in deploy.yaml.`);
+                        + `'${env}'. Define it as a GitHub Environment variable for this repo/env — these `
+                        + `are managed in github-org Terraform (org/config/config.auto.tfvars repo_env_vars `
+                        + `for values, repo_env_config.tf for secrets), never by hand in the GitHub UI. `
+                        + `The reusable CD workflow must also forward it to this stage's env block.`);
                 }
                 resolved[key] = fromEnv;
             }
