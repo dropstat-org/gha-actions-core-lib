@@ -3288,11 +3288,13 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         if (contentRoot !== distPath)
             core.info(`   content root: ${contentRoot} (artifact had a nested dir)`);
         // ── Runtime config (build-once) ─────────────────────────────────────────────
-        // deploy.yaml environments.<env>.runtime_config → <contentRoot>/config.js.
+        // action.yaml s3_deploy.runtime_config (with $VAR resolved from the GitHub
+        // Environment) merged with deploy.yaml environments.<env>.runtime_config, which
+        // wins per key — same precedence as bucket/acl/... → <contentRoot>/config.js.
         // The app loads it via <script src="/config.js"> BEFORE the bundle and reads
         // window.__APP_CONFIG__ instead of baked-in process.env values, so one artifact
         // serves every environment.
-        const runtimeConfig = dy.runtime_config;
+        const runtimeConfig = this.buildRuntimeConfig(cfg.runtime_config, dy.runtime_config, effectiveEnv);
         if (runtimeConfig && Object.keys(runtimeConfig).length > 0) {
             const configJs = `window.__APP_CONFIG__ = ${JSON.stringify(runtimeConfig, null, 2)};\n`;
             fs.writeFileSync(path.join(contentRoot, 'config.js'), configJs);
@@ -3478,6 +3480,35 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             return withIndex;
         // No index.html anywhere obvious — fall back to distPath (sync still runs).
         return distPath;
+    }
+    /**
+     * Merges the action.yaml and deploy.yaml runtime_config blocks, resolving `$VAR`
+     * string values from the environment (the Terraform-managed GitHub Environment
+     * variables). deploy.yaml wins per key, matching the precedence used elsewhere.
+     *
+     * Unlike bucket/acl/..., an unresolved `$VAR` is NOT passed through as a literal:
+     * this file is served to browsers, so a missing variable would silently point the
+     * app at "https://$API_BASE_URL". Fail the deploy instead.
+     */
+    buildRuntimeConfig(fromAction, fromDeploy, env) {
+        const resolved = {};
+        for (const [key, value] of Object.entries(fromAction ?? {})) {
+            if (typeof value === 'string' && value.startsWith('$')) {
+                const varName = value.slice(1);
+                const fromEnv = process.env[varName];
+                if (fromEnv === undefined || fromEnv === '') {
+                    throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy.runtime_config.${key}: variable '${varName}' is not set for environment `
+                        + `'${env}'. Define it as a GitHub Environment variable (managed in github-org `
+                        + `Terraform) or set the value in deploy.yaml.`);
+                }
+                resolved[key] = fromEnv;
+            }
+            else {
+                resolved[key] = value;
+            }
+        }
+        const merged = { ...resolved, ...(fromDeploy ?? {}) };
+        return Object.keys(merged).length > 0 ? merged : undefined;
     }
     readDeployConfig(env) {
         const filePath = path.join(process.cwd(), 'deploy.yaml');
