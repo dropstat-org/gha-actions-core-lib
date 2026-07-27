@@ -1,0 +1,40 @@
+# Canonical Pipeline CI caller — copy to .github/workflows/pipeline-ci.yml in each repo.
+#
+# The CI half builds and validates: compile, unit_test, linter, semgrep, sonarqube,
+# checkov, trivy, publish (image/artifact). Which stages actually run is decided by
+# the branch type and the repo's action.yaml — not here.
+#
+# ── PERMISSIONS: the #1 cause of startup_failure ────────────────────────────────
+# GitHub validates, at run CREATION, every `permissions:` declared by ANY job of the
+# reusable workflow — even jobs that get skipped at runtime. If the caller does not
+# grant them, the run dies as `startup_failure` with no jobs and no useful logs.
+# Declare the full superset below, verbatim. In particular:
+#   packages: write  → publish stage (ECR/GHCR)
+#   actions:  write  → the "Trigger CD" job, which dispatches pipeline-cd
+# `actions: read` is NOT enough for Trigger CD — it needs write to dispatch.
+
+name: Pipeline CI
+
+on:
+  push:
+    branches: [develop, 'feature/**', 'hotfix/**']
+  pull_request:
+  workflow_dispatch:
+
+# Terraform repos only: serialize runs so concurrent plans don't fight over the
+# state lock. Note the group is per-REPO, so pushes to different branches queue
+# behind each other. Drop this block for app repos.
+concurrency:
+  group: tf-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: dropstat-org/gha-actions-core-lib/.github/workflows/pipeline-ci.yml@main
+    secrets: inherit
+    permissions:
+      id-token:        write
+      contents:        write
+      packages:        write
+      security-events: write
+      actions:         write

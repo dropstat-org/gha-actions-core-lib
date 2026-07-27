@@ -1,4 +1,13 @@
-﻿name: ActionsCoreLib App
+# ⚠️ LEGACY - DO NOT USE FOR NEW REPOS.
+#
+# This template predates the reusable-workflow architecture: it hand-rolls the job
+# graph and calls `dropstat/ActionsCoreLib@main`, an action name that no longer
+# exists. Current repos call the reusable workflows instead - see
+# docs/templates/pipeline-ci.yml and docs/templates/pipeline-cd.yml.
+#
+# Kept only as a reference for the stage/branch semantics described below.
+
+name: ActionsCoreLib App
 
 # Push en cualquier rama + PRs hacia develop / master.
 # Los jobs que corren en cada rama los controla ActionsCoreLib vía los flags *_enabled:

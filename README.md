@@ -915,6 +915,22 @@ Stage libre sin restricciones. Útil para pasos one-off.
     - flyway migrate
 ```
 
+### `ecs_deploy` / `s3_deploy`
+
+Stages de deploy tipados, alternativa a `deploy` con `commands` a mano. Ambos son
+**build-once**: despliegan lo que CI ya construyó (imagen o artifact), nunca rebuildean.
+
+| Stage | Para qué | Doc |
+|-------|----------|-----|
+| `ecs_deploy` | Servicios en ECS (promueve la imagen ya publicada) | [`docs/ecs-deploy.md`](docs/ecs-deploy.md) |
+| `s3_deploy` | Frontends estáticos a S3 + CloudFront | [`docs/s3-deploy.md`](docs/s3-deploy.md) |
+
+`s3_deploy` incluye `runtime_config`, que es lo que hace que build-once sea **real** para
+frontends compilados: en vez de hornear la URL de la API en el bundle en tiempo de build
+(lo que obliga a un build por ambiente), escribe un `config.js` por ambiente en el momento
+del deploy y la app lo lee en runtime desde `window.__APP_CONFIG__`. Un solo artifact
+sirve dev/qa/uat/prod.
+
 ---
 
 ## Pasar archivos entre stages (`artifacts`)

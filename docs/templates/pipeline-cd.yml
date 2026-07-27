@@ -1,0 +1,82 @@
+# Canonical Pipeline CD caller — copy to .github/workflows/pipeline-cd.yml in each repo.
+#
+# The CD half only DEPLOYS what CI already built (build-once): it downloads the CI
+# artifact / promotes the existing image — it never rebuilds. `run_id` pins a specific
+# CI run, which is how rollback and redeploy-a-known-good work.
+#
+# ── Where this file must live ───────────────────────────────────────────────────
+# GitHub Environment deployment branch policies are evaluated against the ref the
+# WORKFLOW RUN was created from — NOT the `branch` input below. So a manual dispatch
+# can only reach environments whose branch policy allows the branch you dispatch FROM.
+# With the usual GitFlow policies:
+#
+#   dev  ← develop, feature/*, hotfix/*
+#   qa   ← develop, release/*
+#   uat  ← release/*, v*-rc.*
+#   prod ← main, master, v*
+#
+# If this file only exists on `main`, manual dispatch can ONLY ever reach prod, and
+# qa/uat dispatches fail instantly (job with 0 steps, ~1s, no runner assigned).
+# Either keep this file on every branch that needs to deploy, or dispatch with
+# `--ref` set to a branch the target environment allows:
+#
+#   gh workflow run pipeline-cd.yml --ref release/my-validation \
+#     -f environment=qa -f branch=release/my-validation -f run_id=<ci-run-id>
+#
+# ── run-name ────────────────────────────────────────────────────────────────────
+# Kept in the caller because GitHub evaluates run-name from the CALLER's event
+# context at creation time; a reusable workflow's own run-name is ignored and there
+# is no API to rename a run afterwards. See docs/templates/run-name-cd.yml — that
+# file is the source of truth for this block.
+
+name: Pipeline CD
+
+run-name: >-
+  Deploy ${{ github.event.inputs.environment }} <- ${{ github.event.inputs.branch || github.ref_name }} · ${{ github.event.inputs.sha_tag || github.sha }} · @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch/commit to deploy. Empty = the ref this was dispatched from."
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [dev, qa, uat, prod]
+        default: qa
+      sha_tag:
+        description: "Image/dist tag to deploy (e.g. sha-abcdef). Empty = commit sha of the selected branch."
+        required: false
+        type: string
+        default: ""
+      run_id:
+        description: "CI run id to pull the artifact from (rollback/pin a build). Empty = latest successful CI run."
+        required: false
+        type: string
+        default: ""
+
+# See the note in pipeline-ci.yml: the caller must grant every permission any job of
+# the reusable workflow declares, or the run dies as startup_failure.
+#   issues: write        → the manual approval gate opens an issue
+#   pull-requests: read  → approval/ownership checks
+permissions:
+  id-token:        write
+  contents:        write
+  packages:        write
+  security-events: write
+  actions:         read
+  issues:          write
+  pull-requests:   read
+
+jobs:
+  cd:
+    uses: dropstat-org/gha-actions-core-lib/.github/workflows/pipeline-cd.yml@main
+    secrets: inherit
+    with:
+      deploy_ref:         ${{ github.event.inputs.branch || github.ref_name }}
+      sha_tag:            ${{ github.event.inputs.sha_tag || '' }}
+      run_id:             ${{ github.event.inputs.run_id || '' }}
+      deploy_environment: ${{ github.event.inputs.environment || 'qa' }}
