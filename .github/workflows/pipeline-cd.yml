@@ -445,6 +445,16 @@ jobs:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
           CF_DISTRIBUTION_ID: ${{ vars.CF_DISTRIBUTION_ID }}
           S3_ACL: ${{ vars.S3_ACL }}
+          # Same idea for action.yaml's s3_deploy.runtime_config, which is written to
+          # config.js at deploy time so ONE build-once artifact serves every env (the
+          # app reads window.__APP_CONFIG__ instead of build-time baked env vars).
+          # Values come from the Terraform-managed GitHub Environment vars/secrets
+          # (github-org repo_env_vars / repo_env_config.tf), scoped per env by the
+          # job's `environment:` gate above. An unset $VAR fails the deploy rather
+          # than shipping the literal placeholder to browsers.
+          APP_API_BASE_URL: ${{ vars.APP_API_BASE_URL }}
+          APP_API_PROTOCOL: ${{ vars.APP_API_PROTOCOL }}
+          APP_ENCRYPTION_KEY: ${{ secrets.APP_ENCRYPTION_KEY }}
           # Empty = auto-pick latest CI dist; set = pin to that CI run (rollback).
           DEPLOY_ARTIFACT_RUN_ID: ${{ inputs.run_id }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
