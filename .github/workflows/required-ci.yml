@@ -37,3 +37,24 @@ jobs:
   ci:
     uses: dropstat-org/gha-actions-core-lib/.github/workflows/pipeline-ci.yml@main
     secrets: inherit
+
+  # Guards against pipeline-cd.yml's run-name block drifting from the safe
+  # pattern (see scripts/check-run-name.py for the full rationale: run-name
+  # can't live in the reusable workflow, so every app repo hand-copies it, and
+  # that copy silently rotting is exactly what caused dropstat-desktop-app's
+  # manual-dispatch title to lose its source-branch disambiguation).
+  run-name-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Checkout gha-actions-core-lib (for the check script)
+        uses: actions/checkout@v4
+        with:
+          repository: dropstat-org/gha-actions-core-lib
+          path: .gha-actions-core-lib
+          sparse-checkout: scripts
+
+      - name: Check pipeline-cd.yml run-name
+        run: python3 .gha-actions-core-lib/scripts/check-run-name.py
