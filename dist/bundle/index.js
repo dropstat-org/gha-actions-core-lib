@@ -2251,6 +2251,7 @@ class AbstractStage {
         await this.run(stage);
         if (stage.artifacts?.upload?.length) {
             await this.artifactHandler.upload(stage.artifacts.upload);
+            await this.summaryWriter.writeArtifactUploadSummary(stage.artifacts.upload);
         }
         if (stage.summary) {
             await this.summaryWriter.write(stage.summary);
@@ -3277,7 +3278,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // Empty/unset → auto-pick the latest successful CI run with the artifact.
         const runIdRaw = process.env.DEPLOY_ARTIFACT_RUN_ID?.trim();
         const runIdOverride = runIdRaw && /^\d+$/.test(runIdRaw) ? Number(runIdRaw) : undefined;
-        const fromRun = await this.downloadDist(artifact, distPath, runIdOverride);
+        const { fromRun, shortSha } = await this.downloadDist(artifact, distPath, runIdOverride);
         // Resolve the real content root: the artifact may carry a top-level dir (e.g. a
         // CRA artifact uploaded with `path: build/` zips as `build/index.html`), which —
         // unzipped into distPath — nests as `build/build/index.html`. Syncing distPath
@@ -3372,13 +3373,13 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         await DeploySummary_1.DeploySummary.write({
             kind: 'S3',
             environment: effectiveEnv,
-            artifact: fromRun ? `${artifact} (CI run ${fromRun})` : `${artifact} (local build)`,
+            artifact: fromRun ? `${artifact} (CI run ${fromRun}${shortSha ? `, sha ${shortSha}` : ''})` : `${artifact} (local build)`,
             targets: distribution
                 ? { bucket: `s3://${bucket}/`, distribution }
                 : { bucket: `s3://${bucket}/` },
             trigger: isManualDispatch ? 'manual' : 'auto',
             actor: process.env.GITHUB_ACTOR,
-            commit: process.env.GITHUB_SHA,
+            commit: shortSha || process.env.GITHUB_SHA,
         });
     }
     /**
@@ -3398,7 +3399,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
     async downloadDist(artifact, distPath, runId) {
         if (fs.existsSync(distPath) && fs.readdirSync(distPath).length > 0) {
             core.info(`Dist already present in '${distPath}' — skipping artifact download`);
-            return 0;
+            return { fromRun: 0, shortSha: '' };
         }
         const repo = process.env.GITHUB_REPOSITORY ?? '';
         const token = process.env.GITHUB_TOKEN ?? '';
@@ -3415,6 +3416,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         };
         let archiveUrl = '';
         let fromRun = 0;
+        let headSha = '';
         if (runId) {
             // Explicit run — rollback/redeploy of a specific build.
             const match = (await artifactsOf(runId)).find(a => a.name === artifact);
@@ -3423,6 +3425,9 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             }
             archiveUrl = match.archive_download_url;
             fromRun = runId;
+            const runRes = await fetch(`${api}/actions/runs/${runId}`, { headers });
+            if (runRes.ok)
+                headSha = (await runRes.json()).head_sha ?? '';
         }
         else {
             // Auto-pick: most-recent-first successful "Pipeline CI" run that has the artifact.
@@ -3437,6 +3442,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 if (match) {
                     archiveUrl = match.archive_download_url;
                     fromRun = run.id;
+                    headSha = run.head_sha ?? '';
                     break;
                 }
             }
@@ -3444,7 +3450,8 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no successful 'Pipeline CI' run with artifact '${artifact}' found (checked ${ciRuns.length} runs)`);
             }
         }
-        core.info(`Downloading dist artifact '${artifact}' from CI run ${fromRun}${runId ? ' (explicit run_id)' : ''}`);
+        const shortSha = headSha.slice(0, 7);
+        core.info(`Downloading dist artifact '${artifact}' from CI run ${fromRun}${shortSha ? ` (sha ${shortSha})` : ''}${runId ? ' (explicit run_id)' : ''}`);
         // archive_download_url 302-redirects to a signed blob URL; the Authorization
         // header must NOT follow to the blob host, so resolve the redirect manually.
         const redir = await fetch(archiveUrl, { headers, redirect: 'manual' });
@@ -3459,7 +3466,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         fs.writeFileSync(zipPath, Buffer.from(await blobRes.arrayBuffer()));
         await exec.exec('unzip', ['-o', '-q', zipPath, '-d', distPath]);
         fs.rmSync(zipPath, { force: true });
-        return fromRun;
+        return { fromRun, shortSha };
     }
     /**
      * Returns the directory that actually holds the site (where index.html lives).
@@ -7937,6 +7944,27 @@ const core = __importStar(__nccwpck_require__(37484));
 const exec = __importStar(__nccwpck_require__(95236));
 const fs = __importStar(__nccwpck_require__(79896));
 class SummaryWriter {
+    /**
+     * Auto-emitted whenever a stage uploads a CI artifact — no action.yaml opt-in
+     * needed. Gives devs the short SHA + artifact name to paste into a manual
+     * deploy dispatch (Image/dist tag) without digging through the Actions tab.
+     */
+    async writeArtifactUploadSummary(uploads) {
+        const sha = (process.env.GITHUB_SHA ?? '').slice(0, 7);
+        const runId = process.env.GITHUB_RUN_ID ?? '';
+        if (!sha || uploads.length === 0)
+            return;
+        const rows = uploads.map(u => `| \`${u.name}\` | \`${sha}\` | ${runId} |`).join('\n');
+        const summary = core.summary;
+        summary.addHeading('Build artifact', 2);
+        summary.addRaw([
+            '| artifact | sha | run |',
+            '|--|--|--|',
+            rows,
+            '',
+        ].join('\n'));
+        await summary.write();
+    }
     async write(config) {
         const content = await this.resolveContent(config);
         if (!content.trim())
