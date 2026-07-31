@@ -25,9 +25,23 @@ name: Pipeline CI
 # stage (build-once already gated on the feature push), so it burns a runner and
 # triples the check rollup on the PR for no signal.
 #
-# `main` is included because the CI run on a protected branch is what fires
-# Trigger CD - it does not rebuild (Compile is skipped; build-once promotes the
-# artifact the feature push produced).
+# ── WHICH BRANCHES, and why it depends on the handoff kind ──────────────────────
+# There are exactly two valid shapes. Pick the one matching how this repo hands
+# the build off to the CD, and make sure pipeline-cd.yml agrees - running BOTH
+# fires the CD twice per merge.
+#
+#   artifact handoff (S3 frontends):  CI on [develop, main, feature/**, hotfix/**]
+#     pipeline-cd.yml is workflow_dispatch ONLY. The CI run on the protected
+#     branch does not rebuild (Compile skipped) - it exists to run Trigger CD,
+#     which resolves the run_id of the artifact to promote (from the merged PR)
+#     and dispatches the CD. Without this run the CD cannot know what to deploy.
+#
+#   image handoff (ECS backends):     CI on [feature/**, hotfix/**] only
+#     pipeline-cd.yml carries `on: push: [develop, release/**, main]`. The image
+#     is addressable by sha, so the CD resolves it alone and no Trigger CD run is
+#     needed. Adding develop/main here would fire a SECOND CD on every merge.
+#
+# The shape below is the artifact one. For an ECS repo, cut develop and main.
 on:
   push:
     branches: [develop, main, 'feature/**', 'hotfix/**']
