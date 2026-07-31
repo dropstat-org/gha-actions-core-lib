@@ -3430,13 +3430,36 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 headSha = (await runRes.json()).head_sha ?? '';
         }
         else {
-            // Auto-pick: most-recent-first successful "Pipeline CI" run that has the artifact.
-            const runsRes = await fetch(`${api}/actions/runs?status=success&per_page=50`, { headers });
+            // No explicit run_id → resolve the CI run that built THIS commit on THIS branch.
+            //
+            // This used to be "most-recent-first successful Pipeline CI run that has the
+            // artifact", with no filter at all. That silently deployed whatever built last
+            // - including a run from an unrelated branch - while the CD's run-name still
+            // announced the requested sha. A deploy that cannot prove which commit it is
+            // shipping is worse than a failed deploy, so both filters are now mandatory and
+            // a miss is fatal rather than falling back to "something recent".
+            // Accept "sha-<hex>" (what the CI dispatch sends) or a bare hex sha, full or
+            // short. NOT normalizeShaTag(): that collapses to 7 chars for ECR tags, while
+            // the API's head_sha filter only matches a full 40-char sha - so a short value
+            // has to be matched client-side instead.
+            const wantSha = (process.env.SHA_TAG ?? '').trim().replace(/^sha-/i, '').toLowerCase();
+            const branch = (process.env.PIPELINE_REF ?? process.env.GITHUB_REF_NAME ?? '').replace(/^refs\/heads\//, '');
+            if (!/^[0-9a-f]{7,40}$/.test(wantSha)) {
+                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: cannot resolve which build to deploy - no run_id given and SHA_TAG ` +
+                    `${process.env.SHA_TAG ? `('${process.env.SHA_TAG}') is not a commit sha` : 'is empty'}. ` +
+                    `Re-dispatch with an explicit run_id, or with sha_tag set to the commit to deploy.`);
+            }
+            const query = `status=success&per_page=50`
+                + (wantSha.length === 40 ? `&head_sha=${wantSha}` : '')
+                + (branch ? `&branch=${encodeURIComponent(branch)}` : '');
+            const runsRes = await fetch(`${api}/actions/runs?${query}`, { headers });
             if (!runsRes.ok) {
                 throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: listing runs failed (HTTP ${runsRes.status})`);
             }
             const runs = (await runsRes.json()).workflow_runs ?? [];
-            const ciRuns = runs.filter(r => r.name === 'Pipeline CI');
+            // Always re-check client-side: for a short sha the server did no sha filtering
+            // at all, and for a full one this costs nothing and keeps the guarantee local.
+            const ciRuns = runs.filter(r => r.name === 'Pipeline CI' && (r.head_sha ?? '').toLowerCase().startsWith(wantSha));
             for (const run of ciRuns) {
                 const match = (await artifactsOf(run.id)).find(a => a.name === artifact);
                 if (match) {
@@ -3447,7 +3470,10 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 }
             }
             if (!archiveUrl) {
-                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no successful 'Pipeline CI' run with artifact '${artifact}' found (checked ${ciRuns.length} runs)`);
+                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no successful 'Pipeline CI' run with artifact '${artifact}' for commit ${wantSha}` +
+                    `${branch ? ` on branch '${branch}'` : ''} (checked ${ciRuns.length} runs). ` +
+                    `The commit was never built, its CI failed or was cancelled, or the artifact expired. ` +
+                    `Run CI for that commit, or dispatch with an explicit run_id.`);
             }
         }
         const shortSha = headSha.slice(0, 7);
@@ -4044,6 +4070,8 @@ const AbstractReleaseStage_1 = __nccwpck_require__(10848);
 const Environment_1 = __nccwpck_require__(27413);
 const ImageSHA_1 = __nccwpck_require__(2870);
 const GitVersionResolver_1 = __nccwpck_require__(46601);
+const ActionYaml_1 = __nccwpck_require__(9192);
+const ErrorCode_1 = __nccwpck_require__(9727);
 class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     // Build-once promotion (mirrors the Groovy library's Docker.move: prod←uat, uat←sha).
     // develop/release promote directly from the built sha (1 level: the branch's
@@ -4117,7 +4145,18 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
      */
     sourceShaTag() {
         const manual = process.env.SHA_TAG?.trim();
-        return manual ? (0, ImageSHA_1.normalizeShaTag)(manual) : `sha-${(0, ImageSHA_1.shortSHA)(this.config.metadata.commitHash ?? '')}`;
+        if (manual)
+            return (0, ImageSHA_1.normalizeShaTag)(manual);
+        // With both empty this used to build the literal tag "sha-", which ECR then
+        // rejects as ImageNotFound - an opaque error for what is really "we do not
+        // know which commit to promote". Same rule as s3_deploy: a release that
+        // cannot name its commit must fail loudly, not guess.
+        const commit = this.config.metadata.commitHash ?? '';
+        if (!commit) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, 'app_release: cannot resolve the image to promote - SHA_TAG is empty and the commit ' +
+                'sha is unknown. Re-dispatch with sha_tag set to the commit to release.');
+        }
+        return `sha-${(0, ImageSHA_1.shortSHA)(commit)}`;
     }
     /**
      * Promotes an image to an environment tag (put-image, no rebuild).
