@@ -335,16 +335,18 @@ jobs:
   trigger_cd:
     name: Trigger CD
     needs: [config, compile, unit_test, linter, semgrep, sonarqube, trivy, checkov, publish, generic]
-    # compile/publish must have actually SUCCEEDED - `!= 'failure'` is also true for
-    # 'cancelled', so a cancelled CI used to dispatch a CD for a build that was never
-    # produced, and the CD then deployed whatever built last under the new sha's name.
-    # The remaining jobs stay on `!= 'failure'` on purpose: they legitimately resolve
-    # to 'skipped' depending on the repo (no tests, no terraform, app vs infra).
+    # The target is 'cancelled', not 'skipped'. `!= 'failure'` let a CANCELLED run
+    # dispatch a CD for a build that was never produced, and the CD then deployed
+    # whatever built last under the new sha's name. But a bare `== 'success'` is too
+    # tight: on develop, compile/publish are legitimately 'skipped' because develop
+    # promotes rather than rebuilds (build-once), so requiring success there kills the
+    # develop -> dev deploy entirely. `(success || skipped)` excludes 'cancelled' while
+    # keeping every legitimate skip - which is why the other jobs already use it.
     if: |
       always() &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/')) &&
-      needs.compile.result   == 'success' &&
+      (needs.compile.result  == 'success' || needs.compile.result == 'skipped') &&
       (needs.publish.result  == 'success' || needs.publish.result == 'skipped') &&
       needs.unit_test.result != 'failure' &&
       needs.linter.result    != 'failure' && needs.semgrep.result  != 'failure' &&
@@ -355,10 +357,71 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: write
+      contents: read
+      pull-requests: read
     steps:
-      # run_id pins the CD to the artifact THIS run just built. Without it the CD
-      # falls back to resolving a build itself, which is a strictly weaker guarantee
-      # - we already know the exact run here, so say so.
+      # Which CI run holds the artifact the CD must deploy?
+      #
+      #   feature/hotfix -> this run compiled it, so it is this run.
+      #   develop        -> compile is SKIPPED here (build-once: develop promotes,
+      #                     it does not rebuild), so the artifact belongs to the CI
+      #                     run of the feature branch that was merged in.
+      #
+      # With a squash merge the develop commit has a single parent, so the feature
+      # tip is not reachable through git at all - it has to come from the PR the
+      # commit closed. Until now nothing resolved this: the CD was left to auto-pick
+      # "the most recent successful build anywhere", which happened to be the right
+      # one often enough to look like it worked. That is the whole bug class we are
+      # closing, so an unresolved handoff FAILS here rather than dispatching a CD
+      # that would go on to guess.
+      - name: Resolve the CI run that built this commit
+        id: build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:     ${{ github.repository }}
+          SHA:      ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ needs.compile.result }}" = "success" ]; then
+            echo "run_id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "This run compiled the artifact - pinning the CD to ${{ github.run_id }}."
+            exit 0
+          fi
+
+          # The PR whose merge produced this commit (works for squash and merge commits).
+          build_sha=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
+                        --jq 'map(select(.merged_at != null)) | sort_by(.merged_at) | last | .head.sha // empty')
+          if [ -z "$build_sha" ]; then
+            echo "::error::Cannot resolve which build to deploy: ${SHA} did not compile here and is not"
+            echo "::error::associated with any merged pull request, so the commit that built the artifact"
+            echo "::error::is unknown. Deploy manually with an explicit run_id."
+            exit 1
+          fi
+          echo "Commit ${SHA} came from PR head ${build_sha}."
+
+          # Its successful Pipeline CI run - newest first, and it must still hold artifacts
+          # (they expire; a CI run whose artifacts are gone is not a usable handoff).
+          for rid in $(gh api "repos/${REPO}/actions/runs?head_sha=${build_sha}&status=success&per_page=50" \
+                         --jq '[.workflow_runs[] | select(.name == "Pipeline CI")] | sort_by(.run_started_at) | reverse | .[].id'); do
+            if [ "$(gh api "repos/${REPO}/actions/runs/${rid}/artifacts" --jq '[.artifacts[] | select(.expired == false)] | length')" -gt 0 ]; then
+              echo "run_id=${rid}" >> "$GITHUB_OUTPUT"
+              echo "Pinning the CD to CI run ${rid}."
+              exit 0
+            fi
+            echo "CI run ${rid} has no live artifacts - trying the next one."
+          done
+
+          echo "::error::Cannot resolve which build to deploy: no successful 'Pipeline CI' run with live"
+          echo "::error::artifacts exists for ${build_sha} (the commit merged into ${{ github.ref_name }})."
+          echo "::error::Its CI never ran, failed, or its artifacts expired. Re-run CI on that commit,"
+          echo "::error::or deploy manually with an explicit run_id."
+          exit 1
+
+      # sha_tag stays the commit being DEPLOYED (what the CD run-name announces and
+      # what people look for); run_id names the build it actually ships. On develop
+      # those two are different commits by design, and that is exactly the fact the
+      # old pipeline threw away.
       - name: Dispatch Pipeline CD for ${{ github.ref_name }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -367,4 +430,4 @@ jobs:
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" \
-            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"run_id\":\"${{ github.run_id }}\",\"environment\":\"dev\"}}"
+            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"run_id\":\"${{ steps.build.outputs.run_id }}\",\"environment\":\"dev\"}}"
