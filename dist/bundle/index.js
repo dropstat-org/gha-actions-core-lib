@@ -3459,7 +3459,11 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             const runs = (await runsRes.json()).workflow_runs ?? [];
             // Always re-check client-side: for a short sha the server did no sha filtering
             // at all, and for a full one this costs nothing and keeps the guarantee local.
-            const ciRuns = runs.filter(r => r.name === 'Pipeline CI' && (r.head_sha ?? '').toLowerCase().startsWith(wantSha));
+            // Match the workflow FILE, never the run's display name: callers set `run-name`,
+            // so a CI run reads "CI feature/x - sha-abc - @someone". Filtering on the name
+            // matched nothing and reported "the commit was never built" for builds that were
+            // sitting there with a live artifact.
+            const ciRuns = runs.filter(r => (r.path ?? '').endsWith('/pipeline-ci.yml') && (r.head_sha ?? '').toLowerCase().startsWith(wantSha));
             for (const run of ciRuns) {
                 const match = (await artifactsOf(run.id)).find(a => a.name === artifact);
                 if (match) {
@@ -3470,7 +3474,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 }
             }
             if (!archiveUrl) {
-                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no successful 'Pipeline CI' run with artifact '${artifact}' for commit ${wantSha}` +
+                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: no successful 'pipeline-ci.yml' run with artifact '${artifact}' for commit ${wantSha}` +
                     `${branch ? ` on branch '${branch}'` : ''} (checked ${ciRuns.length} runs). ` +
                     `The commit was never built, its CI failed or was cancelled, or the artifact expired. ` +
                     `Run CI for that commit, or dispatch with an explicit run_id.`);
