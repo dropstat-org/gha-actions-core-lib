@@ -456,8 +456,14 @@ jobs:
           APP_API_BASE_URL: ${{ vars.APP_API_BASE_URL }}
           APP_API_PROTOCOL: ${{ vars.APP_API_PROTOCOL }}
           APP_ENCRYPTION_KEY: ${{ secrets.APP_ENCRYPTION_KEY }}
-          # Empty = auto-pick latest CI dist; set = pin to that CI run (rollback).
+          # Set = pin to that exact CI run (what Trigger CD now always sends, and what
+          # a rollback dispatch sets by hand). Empty = S3DeployStage resolves the CI
+          # run from SHA_TAG + PIPELINE_REF below, and FAILS if that commit has no
+          # successful build - it must never quietly ship a different artifact.
           DEPLOY_ARTIFACT_RUN_ID: ${{ inputs.run_id }}
+          # Required for that resolution, and it is what the run-name already claims
+          # is being deployed - so the claim is now actually enforced.
+          SHA_TAG: ${{ inputs.sha_tag }}
           DEPLOY_SKIP_ACCOUNT_CHECK: ${{ vars.DEPLOY_SKIP_ACCOUNT_CHECK }}
 
   # ── Release: git tag (terraform) or ECR promotion (app) ──────────────────────

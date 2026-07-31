@@ -335,20 +335,30 @@ jobs:
   trigger_cd:
     name: Trigger CD
     needs: [config, compile, unit_test, linter, semgrep, sonarqube, trivy, checkov, publish, generic]
+    # compile/publish must have actually SUCCEEDED - `!= 'failure'` is also true for
+    # 'cancelled', so a cancelled CI used to dispatch a CD for a build that was never
+    # produced, and the CD then deployed whatever built last under the new sha's name.
+    # The remaining jobs stay on `!= 'failure'` on purpose: they legitimately resolve
+    # to 'skipped' depending on the repo (no tests, no terraform, app vs infra).
     if: |
       always() &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/')) &&
-      needs.compile.result   != 'failure' && needs.unit_test.result != 'failure' &&
+      needs.compile.result   == 'success' &&
+      (needs.publish.result  == 'success' || needs.publish.result == 'skipped') &&
+      needs.unit_test.result != 'failure' &&
       needs.linter.result    != 'failure' && needs.semgrep.result  != 'failure' &&
       needs.sonarqube.result != 'failure' && needs.trivy.result    != 'failure' &&
-      needs.checkov.result   != 'failure' && needs.publish.result  != 'failure' &&
+      needs.checkov.result   != 'failure' &&
       needs.generic.result   != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
     permissions:
       actions: write
     steps:
+      # run_id pins the CD to the artifact THIS run just built. Without it the CD
+      # falls back to resolving a build itself, which is a strictly weaker guarantee
+      # - we already know the exact run here, so say so.
       - name: Dispatch Pipeline CD for ${{ github.ref_name }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -357,4 +367,4 @@ jobs:
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" \
-            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"environment\":\"dev\"}}"
+            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"run_id\":\"${{ github.run_id }}\",\"environment\":\"dev\"}}"
