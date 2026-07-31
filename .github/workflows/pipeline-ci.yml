@@ -25,8 +25,14 @@ on:
         type: boolean
         required: false
         default: false
-  workflow_dispatch:
-  pull_request:
+
+# workflow_call ONLY. This file is a reusable workflow: a top-level
+# `pull_request`/`workflow_dispatch` here is dead config (GitHub ignores it for
+# workflow_call), and having it invited every caller to copy `pull_request:` into
+# its own `on:` block. That is what made a single PR start TWO Pipeline CI runs on
+# the same sha - the push run (real work) and a pull_request run that skips every
+# stage. PRs are already covered org-wide by required-ci.yml, which calls this same
+# reusable. Do not add event triggers back here.
 
 jobs:
   config:

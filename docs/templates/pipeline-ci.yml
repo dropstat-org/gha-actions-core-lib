@@ -19,10 +19,18 @@
 
 name: Pipeline CI
 
+# NO `pull_request:` here. Pull requests are already covered org-wide by the
+# ruleset-injected required-ci.yml, which calls this same reusable. Adding
+# `pull_request` starts a SECOND Pipeline CI run on the same sha that skips every
+# stage (build-once already gated on the feature push), so it burns a runner and
+# triples the check rollup on the PR for no signal.
+#
+# `main` is included because the CI run on a protected branch is what fires
+# Trigger CD - it does not rebuild (Compile is skipped; build-once promotes the
+# artifact the feature push produced).
 on:
   push:
-    branches: [develop, 'feature/**', 'hotfix/**']
-  pull_request:
+    branches: [develop, main, 'feature/**', 'hotfix/**']
   workflow_dispatch:
 
 # Terraform repos only: serialize runs so concurrent plans don't fight over the
@@ -42,3 +50,4 @@ jobs:
       packages:        write
       security-events: write
       actions:         write
+      pull-requests:   read    # Trigger CD resolves the build from the merged PR (squash leaves no git link)
