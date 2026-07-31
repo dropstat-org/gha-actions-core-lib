@@ -433,8 +433,12 @@ jobs:
             const {data: runs} = await github.rest.actions.listWorkflowRunsForRepo({
               owner, repo, head_sha: buildSha, status: 'success', per_page: 50,
             });
+            // Match on the workflow FILE, never on `r.name`: callers set `run-name`, so a
+            // CI run is called "CI feature/x - sha-abc - @someone", not "Pipeline CI".
+            // Filtering by name silently found nothing and reported it as "no build
+            // exists" for a build that was sitting right there with a live artifact.
             const ciRuns = runs.workflow_runs
-              .filter(r => r.name === 'Pipeline CI')
+              .filter(r => r.path.endsWith('/pipeline-ci.yml'))
               .sort((a, b) => new Date(b.run_started_at) - new Date(a.run_started_at));
 
             for (const run of ciRuns) {
@@ -450,7 +454,7 @@ jobs:
             }
 
             core.setFailed(
-              `Cannot resolve which build to deploy: no successful 'Pipeline CI' run with live ` +
+              `Cannot resolve which build to deploy: no successful 'pipeline-ci.yml' run with live ` +
               `artifacts exists for ${buildSha} (the commit merged into ${context.ref}). Its CI ` +
               `never ran, failed, or its artifacts expired. Re-run CI on that commit, or deploy ` +
               `manually with an explicit run_id.`);
