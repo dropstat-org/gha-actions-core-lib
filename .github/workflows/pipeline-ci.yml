@@ -491,16 +491,36 @@ jobs:
         # response body away, so a 422 from a caller that does not declare one of
         # these inputs looked like nothing at all. Capture the status and body -
         # the body is the only thing that says WHY the dispatch was refused.
+        #
+        # And on 422, retry once without `run_id`. GitHub rejects the WHOLE dispatch
+        # if it carries a single input the target workflow does not declare, so a CD
+        # that has no `run_id` input (the ECS ones - they promote by image tag, not by
+        # artifact) could never be dispatched from here. Retrying without it fixes
+        # those callers from the library, with no PR needed in their repo. `sha_tag`
+        # still goes, so nothing about WHICH build gets deployed is being guessed.
+        #
+        # It warns loudly rather than falling back quietly: for an S3 caller `run_id`
+        # is what pins the artifact when the pushed sha was never built (a squash
+        # merge to develop), and losing it there is a real failure, not a nuance.
         run: |
+          dispatch() {
+            curl -s -o "$2" -w '%{http_code}' -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" -d "$1"
+          }
+          sha_tag="sha-${{ github.sha }}"
+          run_id="${{ steps.build.outputs.run_id }}"
+          env_name="${{ steps.route.outputs.environment }}"
           body=$(mktemp)
-          code=$(curl -s -o "$body" -w '%{http_code}' -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"run_id\":\"${{ steps.build.outputs.run_id }}\",\"environment\":\"${{ steps.route.outputs.environment }}\"}}")
+          code=$(dispatch "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"${sha_tag}\",\"run_id\":\"${run_id}\",\"environment\":\"${env_name}\"}}" "$body")
+          if [ "$code" = "422" ]; then
+            echo "::warning::Dispatch refused with 422 ($(cat "$body")); retrying without run_id."
+            echo "::warning::This repo's pipeline-cd.yml does not declare a 'run_id' input. Deploying by"
+            echo "::warning::sha_tag alone (${sha_tag}). Fine for ECS, which promotes by image tag. If this"
+            echo "::warning::is an S3/artifact deploy, declare 'run_id' in pipeline-cd.yml - without it a"
+            echo "::warning::squash-merged commit has no build of its own to resolve."
+            code=$(dispatch "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"${sha_tag}\",\"environment\":\"${env_name}\"}}" "$body")
+          fi
           if [ "$code" != "204" ]; then
             echo "::error::Dispatching Pipeline CD failed with HTTP ${code}: $(cat "$body")"
-            if [ "$code" = "422" ]; then
-              echo "::error::A 422 usually means this repo's pipeline-cd.yml does not declare one of"
-              echo "::error::the inputs sent above (sha_tag, run_id, environment). GitHub rejects the"
-              echo "::error::whole dispatch when it sees an input it does not know about."
-            fi
             exit 1
           fi
-          echo "Dispatched Pipeline CD for ${{ github.ref_name }} (run_id=${{ steps.build.outputs.run_id }})."
+          echo "Dispatched Pipeline CD for ${{ github.ref_name }} -> ${env_name} (run_id=${run_id})."
