@@ -355,13 +355,15 @@ jobs:
       needs.generic.result   != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
-    # Only `actions: write` here. A reusable workflow can NARROW the caller's
-    # permissions but never expand them, so naming a scope no caller granted
-    # (`pull-requests`) fails the whole run with startup_failure - in every repo
-    # at once, since they all consume this file at @main. The PR lookup below
-    # therefore has to work with what callers already grant.
-    permissions:
-      actions: write
+    # No `permissions:` block on purpose - this job inherits whatever the caller
+    # granted. A reusable workflow can NARROW the caller's permissions but never
+    # expand them, so pinning `actions: write` here silently stripped the
+    # `pull-requests: read` the callers do grant, and the PR lookup below died with
+    # "Resource not accessible by integration". Naming the scope explicitly is not
+    # the fix either: a caller that has not granted it fails with startup_failure -
+    # in every repo at once, since they all consume this file at @main. Inheriting
+    # works for both. Callers that want the develop handoff must grant
+    # `pull-requests: read`; the step below says so by name when it is missing.
     steps:
       # Which CI run holds the artifact the CD must deploy?
       #
@@ -396,9 +398,24 @@ jobs:
 
             // The PR whose merge produced this commit. Works for squash (single parent,
             // no git link to the feature tip) and for merge commits alike.
-            const {data: pulls} = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-              owner, repo, commit_sha: context.sha,
-            });
+            let pulls;
+            try {
+              ({data: pulls} = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner, repo, commit_sha: context.sha,
+              }));
+            } catch (err) {
+              // Only a 403 means "scope missing" - report that, and only that. The
+              // previous version blamed permissions for every failure, which sent one
+              // diagnosis down the wrong path for an hour.
+              if (err.status === 403) {
+                core.setFailed(
+                  `Cannot resolve which build to deploy: reading the pull requests for ${context.sha} ` +
+                  `was refused. Add 'pull-requests: read' to the permissions block of the job that ` +
+                  `calls this workflow. Meanwhile, deploy manually with an explicit run_id.`);
+                return;
+              }
+              throw err;
+            }
             const merged = pulls.filter(p => p.merged_at)
                                 .sort((a, b) => new Date(a.merged_at) - new Date(b.merged_at));
             const buildSha = merged.at(-1)?.head?.sha;
