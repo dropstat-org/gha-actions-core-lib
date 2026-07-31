@@ -377,59 +377,66 @@ jobs:
       # one often enough to look like it worked. That is the whole bug class we are
       # closing, so an unresolved handoff FAILS here rather than dispatching a CD
       # that would go on to guess.
+      # Implemented with github-script, not `gh`/`jq`: the self-hosted runners have
+      # neither on PATH, and the first version of this step died with
+      # "gh: command not found" while reporting it as a permissions problem. Node and
+      # the toolkit ship with the action itself, so this depends on nothing local.
       - name: Resolve the CI run that built this commit
         id: build
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO:     ${{ github.repository }}
-          SHA:      ${{ github.sha }}
-        run: |
-          set -euo pipefail
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
 
-          if [ "${{ needs.compile.result }}" = "success" ]; then
-            echo "run_id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
-            echo "This run compiled the artifact - pinning the CD to ${{ github.run_id }}."
-            exit 0
-          fi
+            if ('${{ needs.compile.result }}' === 'success') {
+              core.setOutput('run_id', String(context.runId));
+              core.info(`This run compiled the artifact - pinning the CD to ${context.runId}.`);
+              return;
+            }
 
-          # The PR whose merge produced this commit (works for squash and merge commits).
-          # Needs `pull-requests: read`, which the CALLER must grant - see the note on
-          # this job's `permissions`. Distinguish "not allowed" from "no such PR", they
-          # need different fixes.
-          if ! pulls=$(gh api "repos/${REPO}/commits/${SHA}/pulls" 2>&1); then
-            echo "::error::Cannot resolve which build to deploy: reading the pull request for ${SHA}"
-            echo "::error::was refused. Add 'pull-requests: read' to the permissions block of the job"
-            echo "::error::that calls this workflow. Meanwhile, deploy manually with an explicit run_id."
-            echo "$pulls"
-            exit 1
-          fi
-          build_sha=$(printf '%s' "$pulls" \
-                        | jq -r 'map(select(.merged_at != null)) | sort_by(.merged_at) | last | .head.sha // empty')
-          if [ -z "$build_sha" ]; then
-            echo "::error::Cannot resolve which build to deploy: ${SHA} did not compile here and is not"
-            echo "::error::associated with any merged pull request, so the commit that built the artifact"
-            echo "::error::is unknown. Deploy manually with an explicit run_id."
-            exit 1
-          fi
-          echo "Commit ${SHA} came from PR head ${build_sha}."
+            // The PR whose merge produced this commit. Works for squash (single parent,
+            // no git link to the feature tip) and for merge commits alike.
+            const {data: pulls} = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner, repo, commit_sha: context.sha,
+            });
+            const merged = pulls.filter(p => p.merged_at)
+                                .sort((a, b) => new Date(a.merged_at) - new Date(b.merged_at));
+            const buildSha = merged.at(-1)?.head?.sha;
+            if (!buildSha) {
+              core.setFailed(
+                `Cannot resolve which build to deploy: ${context.sha} did not compile here and is ` +
+                `not associated with any merged pull request, so the commit that built the artifact ` +
+                `is unknown. Deploy manually with an explicit run_id.`);
+              return;
+            }
+            core.info(`Commit ${context.sha} came from PR head ${buildSha}.`);
 
-          # Its successful Pipeline CI run - newest first, and it must still hold artifacts
-          # (they expire; a CI run whose artifacts are gone is not a usable handoff).
-          for rid in $(gh api "repos/${REPO}/actions/runs?head_sha=${build_sha}&status=success&per_page=50" \
-                         --jq '[.workflow_runs[] | select(.name == "Pipeline CI")] | sort_by(.run_started_at) | reverse | .[].id'); do
-            if [ "$(gh api "repos/${REPO}/actions/runs/${rid}/artifacts" --jq '[.artifacts[] | select(.expired == false)] | length')" -gt 0 ]; then
-              echo "run_id=${rid}" >> "$GITHUB_OUTPUT"
-              echo "Pinning the CD to CI run ${rid}."
-              exit 0
-            fi
-            echo "CI run ${rid} has no live artifacts - trying the next one."
-          done
+            // Its successful Pipeline CI runs, newest first. The run must still HOLD
+            // artifacts - they expire, and an empty run is not a usable handoff.
+            const {data: runs} = await github.rest.actions.listWorkflowRunsForRepo({
+              owner, repo, head_sha: buildSha, status: 'success', per_page: 50,
+            });
+            const ciRuns = runs.workflow_runs
+              .filter(r => r.name === 'Pipeline CI')
+              .sort((a, b) => new Date(b.run_started_at) - new Date(a.run_started_at));
 
-          echo "::error::Cannot resolve which build to deploy: no successful 'Pipeline CI' run with live"
-          echo "::error::artifacts exists for ${build_sha} (the commit merged into ${{ github.ref_name }})."
-          echo "::error::Its CI never ran, failed, or its artifacts expired. Re-run CI on that commit,"
-          echo "::error::or deploy manually with an explicit run_id."
-          exit 1
+            for (const run of ciRuns) {
+              const {data: arts} = await github.rest.actions.listWorkflowRunArtifacts({
+                owner, repo, run_id: run.id,
+              });
+              if (arts.artifacts.some(a => !a.expired)) {
+                core.setOutput('run_id', String(run.id));
+                core.info(`Pinning the CD to CI run ${run.id}.`);
+                return;
+              }
+              core.info(`CI run ${run.id} has no live artifacts - trying the next one.`);
+            }
+
+            core.setFailed(
+              `Cannot resolve which build to deploy: no successful 'Pipeline CI' run with live ` +
+              `artifacts exists for ${buildSha} (the commit merged into ${context.ref}). Its CI ` +
+              `never ran, failed, or its artifacts expired. Re-run CI on that commit, or deploy ` +
+              `manually with an explicit run_id.`);
 
       # sha_tag stays the commit being DEPLOYED (what the CD run-name announces and
       # what people look for); run_id names the build it actually ships. On develop
