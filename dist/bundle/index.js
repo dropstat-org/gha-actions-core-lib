@@ -857,6 +857,7 @@ var StageName;
     StageName["VALIDATE_APPROVER"] = "validate-approver";
     StageName["VALIDATE_CONFIRM"] = "validate-confirm";
     StageName["SETUP_TERRAGRUNT"] = "setup-terragrunt";
+    StageName["TRIGGER_CD"] = "trigger-cd";
     StageName["GENERIC"] = "generic";
     StageName["ECS_DEPLOY"] = "ecs_deploy";
     StageName["S3_DEPLOY"] = "s3_deploy";
@@ -916,6 +917,7 @@ const StageName_1 = __nccwpck_require__(90969);
 const ValidateApproverStage_1 = __nccwpck_require__(18487);
 const ValidateConfirmStage_1 = __nccwpck_require__(63182);
 const SetupTerragruntStage_1 = __nccwpck_require__(39231);
+const TriggerCdStage_1 = __nccwpck_require__(62034);
 async function run() {
     try {
         const configPath = core.getInput('config') || 'action.yaml';
@@ -937,6 +939,14 @@ async function run() {
         }
         if (stageName === StageName_1.StageName.VALIDATE_CONFIRM) {
             ValidateConfirmStage_1.ValidateConfirmStage.run();
+            return;
+        }
+        // Like the validate-* stages, this one is not declared in action.yaml: it is
+        // pipeline machinery, not something a repo opts into. It still needs the parsed
+        // config, because WHICH inputs the CD accepts follows from the deploy stages the
+        // repo declares.
+        if (stageName === StageName_1.StageName.TRIGGER_CD) {
+            await TriggerCdStage_1.TriggerCdStage.run(config);
             return;
         }
         if (stageName === StageName_1.StageName.SETUP_TERRAGRUNT) {
@@ -3582,6 +3592,213 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
 }
 exports.S3DeployStage = S3DeployStage;
 //# sourceMappingURL=S3DeployStage.js.map
+
+/***/ }),
+
+/***/ 62034:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TriggerCdStage = void 0;
+exports.environmentFor = environmentFor;
+exports.handoffKindFor = handoffKindFor;
+const core = __importStar(__nccwpck_require__(37484));
+const ActionYaml_1 = __nccwpck_require__(9192);
+const ErrorCode_1 = __nccwpck_require__(9727);
+const StageName_1 = __nccwpck_require__(90969);
+const Env_1 = __nccwpck_require__(45188);
+/** Environment a pushed branch deploys to, or null when it deploys nowhere. */
+function environmentFor(ref) {
+    const branch = ref.replace(/^refs\/heads\//, '');
+    if (branch === 'develop')
+        return 'qa';
+    if (branch === 'main' || branch === 'master')
+        return 'prod';
+    if (branch.startsWith('feature/') || branch.startsWith('hotfix/'))
+        return 'dev';
+    // release/* deliberately deploys nowhere from CI: the uat environment's branch
+    // policy is what gates uat, and it is dispatched by hand after QA signs off.
+    return null;
+}
+/**
+ * Which kind of handoff this repo's action.yaml describes.
+ *
+ * Read from the stages the repo actually declares rather than from a flag someone
+ * has to remember to set: a repo with an `s3_deploy` stage promotes a file bundle,
+ * anything else (ecs_deploy, and any future registry-based deploy) promotes by tag.
+ */
+function handoffKindFor(config) {
+    return config.stages.some(s => s.name === StageName_1.StageName.S3_DEPLOY) ? 'artifact' : 'image';
+}
+class TriggerCdStage {
+    static api = 'https://api.github.com';
+    static async run(config) {
+        const ref = Env_1.Env.ref();
+        const environment = environmentFor(ref);
+        if (!environment) {
+            core.info(`${Env_1.Env.refName()} does not deploy from CI - nothing to dispatch.`);
+            return;
+        }
+        const kind = handoffKindFor(config);
+        core.info(`${Env_1.Env.refName()} deploys to ${environment}; this repo promotes by ${kind}.`);
+        const inputs = {
+            sha_tag: `sha-${Env_1.Env.sha()}`,
+            environment,
+        };
+        // Only an artifact handoff needs to name a run. For an image handoff the tag IS
+        // the identity, so resolving a run id would be work done to produce a value the
+        // CD has no input for.
+        if (kind === 'artifact') {
+            inputs.run_id = String(await this.resolveRunId());
+        }
+        await this.dispatch(inputs, kind);
+    }
+    /**
+     * The CI run holding the artifact to deploy.
+     *
+     *   feature/hotfix — this run compiled it, so it is this run.
+     *   develop        — compile is SKIPPED (build-once: develop promotes, it does not
+     *                    rebuild), so the artifact belongs to the CI run of the feature
+     *                    branch that was merged in.
+     *
+     * With a squash merge the develop commit has a single parent, so the feature tip is
+     * unreachable through git - it has to come from the PR the commit closed. An
+     * unresolved handoff throws: the CD would otherwise fall back to "the most recent
+     * successful build anywhere", which is right often enough to look like it works.
+     */
+    static async resolveRunId() {
+        const thisRun = Number(Env_1.Env.get('GITHUB_RUN_ID'));
+        if (Env_1.Env.get('COMPILE_RESULT') === 'success') {
+            core.info(`This run compiled the artifact - pinning the CD to ${thisRun}.`);
+            return thisRun;
+        }
+        const sha = Env_1.Env.sha();
+        const pulls = await this.get(`/repos/${Env_1.Env.repository()}/commits/${sha}/pulls`, 
+        // A 403 here means one specific thing, and saying so by name is the difference
+        // between a two-minute fix and an hour of guessing - an earlier version blamed
+        // permissions for every failure and sent one diagnosis down the wrong path.
+        status => status === 403
+            ? `reading the pull requests for ${sha} was refused. Add 'pull-requests: read' to the ` +
+                `permissions block of the job that calls this workflow.`
+            : null);
+        const merged = pulls
+            .filter(p => p.merged_at)
+            .sort((a, b) => Date.parse(a.merged_at) - Date.parse(b.merged_at));
+        const buildSha = merged[merged.length - 1]?.head?.sha;
+        if (!buildSha) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Cannot resolve which build to deploy: ${sha} did not compile here and is not associated ` +
+                `with any merged pull request, so the commit that built the artifact is unknown. ` +
+                `Deploy manually with an explicit run_id.`);
+        }
+        core.info(`Commit ${sha} came from PR head ${buildSha}.`);
+        const runs = await this.get(`/repos/${Env_1.Env.repository()}/actions/runs?head_sha=${buildSha}&status=success&per_page=50`);
+        // Match the workflow FILE, never the run's display name: callers set `run-name`, so
+        // a CI run reads "CI feature/x - sha-abc - @someone". Filtering on the name matched
+        // nothing and reported "no build exists" for builds sitting there with a live artifact.
+        const ciRuns = (runs.workflow_runs ?? [])
+            .filter(r => (r.path ?? '').endsWith('/pipeline-ci.yml'))
+            .sort((a, b) => Date.parse(b.run_started_at ?? '') - Date.parse(a.run_started_at ?? ''));
+        for (const run of ciRuns) {
+            // Artifacts expire. A run that no longer holds one is not a usable handoff, so
+            // the check is "has a live artifact", not "succeeded".
+            const arts = await this.get(`/repos/${Env_1.Env.repository()}/actions/runs/${run.id}/artifacts`);
+            if ((arts.artifacts ?? []).some(a => !a.expired)) {
+                core.info(`Pinning the CD to CI run ${run.id}.`);
+                return run.id;
+            }
+            core.info(`CI run ${run.id} has no live artifacts - trying the next one.`);
+        }
+        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Cannot resolve which build to deploy: no successful 'pipeline-ci.yml' run with live ` +
+            `artifacts exists for ${buildSha} (the commit merged into ${Env_1.Env.refName()}). Its CI never ` +
+            `ran, failed, or its artifacts expired. Re-run CI on that commit, or deploy manually with ` +
+            `an explicit run_id.`);
+    }
+    static async dispatch(inputs, kind) {
+        const res = await fetch(`${this.api}/repos/${Env_1.Env.repository()}/actions/workflows/pipeline-cd.yml/dispatches`, {
+            method: 'POST',
+            headers: this.headers(),
+            body: JSON.stringify({ ref: Env_1.Env.refName(), inputs }),
+        });
+        if (res.status === 204) {
+            core.info(`Dispatched Pipeline CD for ${Env_1.Env.refName()} -> ${inputs.environment} ` +
+                `(${Object.keys(inputs).join(', ')}).`);
+            return;
+        }
+        const body = await res.text();
+        // A 422 means the target workflow does not declare one of the inputs sent. Which
+        // input, and whether that is the repo's fault, depends entirely on the handoff kind
+        // - so name it rather than making the reader work it out from a raw API body.
+        if (res.status === 422) {
+            const hint = kind === 'artifact'
+                ? `This repo promotes a build artifact, so 'run_id' is required: sha_tag alone cannot ` +
+                    `identify the bundle when the pushed commit is a squash merge that was never built. ` +
+                    `Declare a 'run_id' input in this repo's pipeline-cd.yml.`
+                : `This repo promotes by image tag and this stage sends no 'run_id', so the missing input ` +
+                    `is 'sha_tag' or 'environment'. Declare both in this repo's pipeline-cd.yml.`;
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Pipeline CD refused the dispatch (HTTP 422): ${body}\n${hint}`);
+        }
+        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Dispatching Pipeline CD failed with HTTP ${res.status}: ${body}`);
+    }
+    static headers() {
+        const token = Env_1.Env.get('GITHUB_TOKEN');
+        if (!token) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `trigger-cd: GITHUB_TOKEN is required to dispatch Pipeline CD`);
+        }
+        return {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+        };
+    }
+    static async get(path, explain) {
+        const res = await fetch(`${this.api}${path}`, { headers: this.headers() });
+        if (!res.ok) {
+            const detail = explain?.(res.status);
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, detail
+                ? `Cannot resolve which build to deploy: ${detail} Meanwhile, deploy manually with an ` +
+                    `explicit run_id.`
+                : `Cannot resolve which build to deploy: GET ${path} failed (HTTP ${res.status}).`);
+        }
+        return (await res.json());
+    }
+}
+exports.TriggerCdStage = TriggerCdStage;
+//# sourceMappingURL=TriggerCdStage.js.map
 
 /***/ }),
 
