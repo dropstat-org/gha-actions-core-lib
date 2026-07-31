@@ -355,10 +355,13 @@ jobs:
       needs.generic.result   != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
+    # Only `actions: write` here. A reusable workflow can NARROW the caller's
+    # permissions but never expand them, so naming a scope no caller granted
+    # (`pull-requests`) fails the whole run with startup_failure - in every repo
+    # at once, since they all consume this file at @main. The PR lookup below
+    # therefore has to work with what callers already grant.
     permissions:
       actions: write
-      contents: read
-      pull-requests: read
     steps:
       # Which CI run holds the artifact the CD must deploy?
       #
@@ -390,8 +393,18 @@ jobs:
           fi
 
           # The PR whose merge produced this commit (works for squash and merge commits).
-          build_sha=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
-                        --jq 'map(select(.merged_at != null)) | sort_by(.merged_at) | last | .head.sha // empty')
+          # Needs `pull-requests: read`, which the CALLER must grant - see the note on
+          # this job's `permissions`. Distinguish "not allowed" from "no such PR", they
+          # need different fixes.
+          if ! pulls=$(gh api "repos/${REPO}/commits/${SHA}/pulls" 2>&1); then
+            echo "::error::Cannot resolve which build to deploy: reading the pull request for ${SHA}"
+            echo "::error::was refused. Add 'pull-requests: read' to the permissions block of the job"
+            echo "::error::that calls this workflow. Meanwhile, deploy manually with an explicit run_id."
+            echo "$pulls"
+            exit 1
+          fi
+          build_sha=$(printf '%s' "$pulls" \
+                        | jq -r 'map(select(.merged_at != null)) | sort_by(.merged_at) | last | .head.sha // empty')
           if [ -z "$build_sha" ]; then
             echo "::error::Cannot resolve which build to deploy: ${SHA} did not compile here and is not"
             echo "::error::associated with any merged pull request, so the commit that built the artifact"
