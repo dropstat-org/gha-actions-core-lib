@@ -365,162 +365,26 @@ jobs:
     # works for both. Callers that want the develop handoff must grant
     # `pull-requests: read`; the step below says so by name when it is missing.
     steps:
-      # Which environment this push deploys to. One rule, in one place - callers must
-      # not each re-derive it, which is how `dropstat-new-backend` ended up dispatching
-      # dev from CI while its own `on: push` dispatched qa for the very same merge:
-      # two deploys per merge to develop.
+      - uses: actions/checkout@v4.2.2
+      # Everything this job used to do inline - routing the branch to an environment,
+      # resolving which CI run holds the artifact, and shaping the dispatch payload -
+      # now lives in TriggerCdStage, under test. The three regressions this step
+      # shipped in two days were all in untestable shell and github-script: a filter on
+      # a run's display name that `run-name` had just made meaningless, a blanket error
+      # handler that blamed permissions for a missing binary, and a `run_id` sent to
+      # callers whose CD does not declare it. None of the three could fail a test,
+      # because there were no tests to fail.
       #
-      #   feature/*, hotfix/*  -> dev    (dev is where features are tried)
-      #   develop              -> qa
-      #   main                 -> prod   (the CD's own approval job still gates it)
-      #   release/*            -> nothing; uat is dispatched by hand, because the uat
-      #                           environment's branch policy does not accept develop
-      - name: Route ${{ github.ref_name }} to an environment
-        id: route
-        run: |
-          case "${{ github.ref }}" in
-            refs/heads/develop) env=qa   ;;
-            refs/heads/main)    env=prod ;;
-            *)                  env=dev  ;;
-          esac
-          echo "environment=${env}" >> "$GITHUB_OUTPUT"
-          echo "${{ github.ref_name }} deploys to ${env}."
-
-      # Which CI run holds the artifact the CD must deploy?
-      #
-      #   feature/hotfix -> this run compiled it, so it is this run.
-      #   develop        -> compile is SKIPPED here (build-once: develop promotes,
-      #                     it does not rebuild), so the artifact belongs to the CI
-      #                     run of the feature branch that was merged in.
-      #
-      # With a squash merge the develop commit has a single parent, so the feature
-      # tip is not reachable through git at all - it has to come from the PR the
-      # commit closed. Until now nothing resolved this: the CD was left to auto-pick
-      # "the most recent successful build anywhere", which happened to be the right
-      # one often enough to look like it worked. That is the whole bug class we are
-      # closing, so an unresolved handoff FAILS here rather than dispatching a CD
-      # that would go on to guess.
-      # Implemented with github-script, not `gh`/`jq`: the self-hosted runners have
-      # neither on PATH, and the first version of this step died with
-      # "gh: command not found" while reporting it as a permissions problem. Node and
-      # the toolkit ship with the action itself, so this depends on nothing local.
-      - name: Resolve the CI run that built this commit
-        id: build
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-
-            if ('${{ needs.compile.result }}' === 'success') {
-              core.setOutput('run_id', String(context.runId));
-              core.info(`This run compiled the artifact - pinning the CD to ${context.runId}.`);
-              return;
-            }
-
-            // The PR whose merge produced this commit. Works for squash (single parent,
-            // no git link to the feature tip) and for merge commits alike.
-            let pulls;
-            try {
-              ({data: pulls} = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner, repo, commit_sha: context.sha,
-              }));
-            } catch (err) {
-              // Only a 403 means "scope missing" - report that, and only that. The
-              // previous version blamed permissions for every failure, which sent one
-              // diagnosis down the wrong path for an hour.
-              if (err.status === 403) {
-                core.setFailed(
-                  `Cannot resolve which build to deploy: reading the pull requests for ${context.sha} ` +
-                  `was refused. Add 'pull-requests: read' to the permissions block of the job that ` +
-                  `calls this workflow. Meanwhile, deploy manually with an explicit run_id.`);
-                return;
-              }
-              throw err;
-            }
-            const merged = pulls.filter(p => p.merged_at)
-                                .sort((a, b) => new Date(a.merged_at) - new Date(b.merged_at));
-            const buildSha = merged.at(-1)?.head?.sha;
-            if (!buildSha) {
-              core.setFailed(
-                `Cannot resolve which build to deploy: ${context.sha} did not compile here and is ` +
-                `not associated with any merged pull request, so the commit that built the artifact ` +
-                `is unknown. Deploy manually with an explicit run_id.`);
-              return;
-            }
-            core.info(`Commit ${context.sha} came from PR head ${buildSha}.`);
-
-            // Its successful Pipeline CI runs, newest first. The run must still HOLD
-            // artifacts - they expire, and an empty run is not a usable handoff.
-            const {data: runs} = await github.rest.actions.listWorkflowRunsForRepo({
-              owner, repo, head_sha: buildSha, status: 'success', per_page: 50,
-            });
-            // Match on the workflow FILE, never on `r.name`: callers set `run-name`, so a
-            // CI run is called "CI feature/x - sha-abc - @someone", not "Pipeline CI".
-            // Filtering by name silently found nothing and reported it as "no build
-            // exists" for a build that was sitting right there with a live artifact.
-            const ciRuns = runs.workflow_runs
-              .filter(r => r.path.endsWith('/pipeline-ci.yml'))
-              .sort((a, b) => new Date(b.run_started_at) - new Date(a.run_started_at));
-
-            for (const run of ciRuns) {
-              const {data: arts} = await github.rest.actions.listWorkflowRunArtifacts({
-                owner, repo, run_id: run.id,
-              });
-              if (arts.artifacts.some(a => !a.expired)) {
-                core.setOutput('run_id', String(run.id));
-                core.info(`Pinning the CD to CI run ${run.id}.`);
-                return;
-              }
-              core.info(`CI run ${run.id} has no live artifacts - trying the next one.`);
-            }
-
-            core.setFailed(
-              `Cannot resolve which build to deploy: no successful 'pipeline-ci.yml' run with live ` +
-              `artifacts exists for ${buildSha} (the commit merged into ${context.ref}). Its CI ` +
-              `never ran, failed, or its artifacts expired. Re-run CI on that commit, or deploy ` +
-              `manually with an explicit run_id.`);
-
-      # sha_tag stays the commit being DEPLOYED (what the CD run-name announces and
-      # what people look for); run_id names the build it actually ships. On develop
-      # those two are different commits by design, and that is exactly the fact the
-      # old pipeline threw away.
-      - name: Dispatch Pipeline CD to ${{ steps.route.outputs.environment }}
+      # Notably, that last one is the reason the payload is no longer fixed: a repo with
+      # an `s3_deploy` stage promotes a file bundle and needs `run_id`; one with
+      # `ecs_deploy` promotes an image by tag and its CD declares no such input, so
+      # sending it got the whole dispatch rejected with 422. The stage reads
+      # action.yaml and decides - the YAML has no business knowing.
+      - uses: dropstat-org/gha-actions-core-lib@main
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # No `-f`: it fails the step with a bare "exit code 22" and `-s` throws the
-        # response body away, so a 422 from a caller that does not declare one of
-        # these inputs looked like nothing at all. Capture the status and body -
-        # the body is the only thing that says WHY the dispatch was refused.
-        #
-        # And on 422, retry once without `run_id`. GitHub rejects the WHOLE dispatch
-        # if it carries a single input the target workflow does not declare, so a CD
-        # that has no `run_id` input (the ECS ones - they promote by image tag, not by
-        # artifact) could never be dispatched from here. Retrying without it fixes
-        # those callers from the library, with no PR needed in their repo. `sha_tag`
-        # still goes, so nothing about WHICH build gets deployed is being guessed.
-        #
-        # It warns loudly rather than falling back quietly: for an S3 caller `run_id`
-        # is what pins the artifact when the pushed sha was never built (a squash
-        # merge to develop), and losing it there is a real failure, not a nuance.
-        run: |
-          dispatch() {
-            curl -s -o "$2" -w '%{http_code}' -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" -d "$1"
-          }
-          sha_tag="sha-${{ github.sha }}"
-          run_id="${{ steps.build.outputs.run_id }}"
-          env_name="${{ steps.route.outputs.environment }}"
-          body=$(mktemp)
-          code=$(dispatch "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"${sha_tag}\",\"run_id\":\"${run_id}\",\"environment\":\"${env_name}\"}}" "$body")
-          if [ "$code" = "422" ]; then
-            echo "::warning::Dispatch refused with 422 ($(cat "$body")); retrying without run_id."
-            echo "::warning::This repo's pipeline-cd.yml does not declare a 'run_id' input. Deploying by"
-            echo "::warning::sha_tag alone (${sha_tag}). Fine for ECS, which promotes by image tag. If this"
-            echo "::warning::is an S3/artifact deploy, declare 'run_id' in pipeline-cd.yml - without it a"
-            echo "::warning::squash-merged commit has no build of its own to resolve."
-            code=$(dispatch "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"${sha_tag}\",\"environment\":\"${env_name}\"}}" "$body")
-          fi
-          if [ "$code" != "204" ]; then
-            echo "::error::Dispatching Pipeline CD failed with HTTP ${code}: $(cat "$body")"
-            exit 1
-          fi
-          echo "Dispatched Pipeline CD for ${{ github.ref_name }} -> ${env_name} (run_id=${run_id})."
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # On develop compile is skipped (build-once promotes, it does not rebuild),
+          # which is exactly the signal that the artifact belongs to another run.
+          COMPILE_RESULT: ${{ needs.compile.result }}
+        with:
+          stage: trigger-cd
