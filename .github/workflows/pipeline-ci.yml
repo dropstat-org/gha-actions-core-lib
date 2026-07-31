@@ -345,7 +345,7 @@ jobs:
     if: |
       always() &&
       github.event_name == 'push' &&
-      (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/')) &&
+      (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/')) &&
       (needs.compile.result  == 'success' || needs.compile.result == 'skipped') &&
       (needs.publish.result  == 'success' || needs.publish.result == 'skipped') &&
       needs.unit_test.result != 'failure' &&
@@ -365,6 +365,27 @@ jobs:
     # works for both. Callers that want the develop handoff must grant
     # `pull-requests: read`; the step below says so by name when it is missing.
     steps:
+      # Which environment this push deploys to. One rule, in one place - callers must
+      # not each re-derive it, which is how `dropstat-new-backend` ended up dispatching
+      # dev from CI while its own `on: push` dispatched qa for the very same merge:
+      # two deploys per merge to develop.
+      #
+      #   feature/*, hotfix/*  -> dev    (dev is where features are tried)
+      #   develop              -> qa
+      #   main                 -> prod   (the CD's own approval job still gates it)
+      #   release/*            -> nothing; uat is dispatched by hand, because the uat
+      #                           environment's branch policy does not accept develop
+      - name: Route ${{ github.ref_name }} to an environment
+        id: route
+        run: |
+          case "${{ github.ref }}" in
+            refs/heads/develop) env=qa   ;;
+            refs/heads/main)    env=prod ;;
+            *)                  env=dev  ;;
+          esac
+          echo "environment=${env}" >> "$GITHUB_OUTPUT"
+          echo "${{ github.ref_name }} deploys to ${env}."
+
       # Which CI run holds the artifact the CD must deploy?
       #
       #   feature/hotfix -> this run compiled it, so it is this run.
@@ -463,7 +484,7 @@ jobs:
       # what people look for); run_id names the build it actually ships. On develop
       # those two are different commits by design, and that is exactly the fact the
       # old pipeline threw away.
-      - name: Dispatch Pipeline CD for ${{ github.ref_name }}
+      - name: Dispatch Pipeline CD to ${{ steps.route.outputs.environment }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # No `-f`: it fails the step with a bare "exit code 22" and `-s` throws the
@@ -472,7 +493,7 @@ jobs:
         # the body is the only thing that says WHY the dispatch was refused.
         run: |
           body=$(mktemp)
-          code=$(curl -s -o "$body" -w '%{http_code}' -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"run_id\":\"${{ steps.build.outputs.run_id }}\",\"environment\":\"dev\"}}")
+          code=$(curl -s -o "$body" -w '%{http_code}' -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"run_id\":\"${{ steps.build.outputs.run_id }}\",\"environment\":\"${{ steps.route.outputs.environment }}\"}}")
           if [ "$code" != "204" ]; then
             echo "::error::Dispatching Pipeline CD failed with HTTP ${code}: $(cat "$body")"
             if [ "$code" = "422" ]; then
