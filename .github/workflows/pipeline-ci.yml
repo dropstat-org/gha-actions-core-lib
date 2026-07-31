@@ -462,9 +462,20 @@ jobs:
       - name: Dispatch Pipeline CD for ${{ github.ref_name }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # No `-f`: it fails the step with a bare "exit code 22" and `-s` throws the
+        # response body away, so a 422 from a caller that does not declare one of
+        # these inputs looked like nothing at all. Capture the status and body -
+        # the body is the only thing that says WHY the dispatch was refused.
         run: |
-          curl -sf -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" \
-            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"run_id\":\"${{ steps.build.outputs.run_id }}\",\"environment\":\"dev\"}}"
+          body=$(mktemp)
+          code=$(curl -s -o "$body" -w '%{http_code}' -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/actions/workflows/pipeline-cd.yml/dispatches" -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"sha_tag\":\"sha-${{ github.sha }}\",\"run_id\":\"${{ steps.build.outputs.run_id }}\",\"environment\":\"dev\"}}")
+          if [ "$code" != "204" ]; then
+            echo "::error::Dispatching Pipeline CD failed with HTTP ${code}: $(cat "$body")"
+            if [ "$code" = "422" ]; then
+              echo "::error::A 422 usually means this repo's pipeline-cd.yml does not declare one of"
+              echo "::error::the inputs sent above (sha_tag, run_id, environment). GitHub rejects the"
+              echo "::error::whole dispatch when it sees an input it does not know about."
+            fi
+            exit 1
+          fi
+          echo "Dispatched Pipeline CD for ${{ github.ref_name }} (run_id=${{ steps.build.outputs.run_id }})."
