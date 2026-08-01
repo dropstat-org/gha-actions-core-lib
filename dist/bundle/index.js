@@ -1826,7 +1826,13 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
         try {
             await this.install();
             const sonarToken = Credentials_1.Credentials.sonarToken();
-            const sonarUrl = Credentials_1.Credentials.optional('SONAR_HOST_URL');
+            // Read straight from the environment, NOT through Credentials: every value
+            // Credentials touches gets core.setSecret(), and the host url is not a secret -
+            // it is an org *variable* (SONAR_HOST_URL=https://sonarqube.tools.dropstat.com).
+            // Masking it turned the one useful line the scanner prints into
+            // "you can find the results at: ***/dashboard?id=...", i.e. a dashboard link
+            // nobody can follow, in every CI log. The token stays masked.
+            const sonarUrl = process.env.SONAR_HOST_URL ?? '';
             // projectKey = artifactId — generado automáticamente desde projectId+serviceId
             const projectKey = this.config.metadata.artifactId ?? '';
             // The Java/JVM sensor needs compiled classes (shared from the compile stage
