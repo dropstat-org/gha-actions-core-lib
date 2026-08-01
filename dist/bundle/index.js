@@ -3660,8 +3660,12 @@ function environmentFor(ref) {
         return 'prod';
     if (branch.startsWith('feature/') || branch.startsWith('hotfix/'))
         return 'dev';
-    // release/* deliberately deploys nowhere from CI: the uat environment's branch
-    // policy is what gates uat, and it is dispatched by hand after QA signs off.
+    // release/* is an independent line of work: it is cut from develop, builds its own
+    // commits, and is merged back to develop when done. uat is its test environment
+    // (qa stays with develop), so a push here deploys to uat. The uat environment's
+    // required reviewers remain the gate; this only removes the manual dispatch step.
+    if (branch.startsWith('release/'))
+        return 'uat';
     return null;
 }
 /**
@@ -8972,12 +8976,15 @@ class AppWorkflow extends Workflow_1.Workflow {
                 // runs the library, which skips every stage here (fast no-op gate).
                 return [];
             case BranchType_1.BranchType.RELEASE:
-                // See FORCE_BUILD_STAGES above — direct pushes to a standing release/**
-                // deploy branch (no prior feature/hotfix build for this sha) opt in via
-                // FORCE_BUILD_OVERRIDE=true to compile+publish before promoting.
-                return (process.env.FORCE_BUILD_OVERRIDE ?? '').toLowerCase() === 'true'
-                    ? FORCE_BUILD_STAGES
-                    : PROMOTE_STAGES;
+                // A release branch is an independent line of work, not a frozen pointer at
+                // develop: it is cut from develop, takes its own fix commits, and is merged
+                // back to develop when done. So it BUILDS (its own commits have no prior
+                // feature build to promote) and then deploys to uat, its test environment.
+                // This used to be PROMOTE_STAGES with FORCE_BUILD_OVERRIDE=true as the opt-in
+                // escape hatch; that made a fix commit on a release deploy an image that was
+                // never built for that sha. The override is now redundant - build is the
+                // default - and is kept only so existing callers that set it still work.
+                return FORCE_BUILD_STAGES;
             case BranchType_1.BranchType.DEVELOP:
             case BranchType_1.BranchType.MASTER:
                 // Scan the already-built image then promote to the env tag.
