@@ -348,10 +348,17 @@ jobs:
     # promotes rather than rebuilds (build-once), so requiring success there kills the
     # develop -> dev deploy entirely. `(success || skipped)` excludes 'cancelled' while
     # keeping every legitimate skip - which is why the other jobs already use it.
+    #
+    # There is deliberately NO branch list here. Which branches deploy is decided in
+    # exactly one place - environmentFor() in TriggerCdStage.ts - and the stage exits
+    # quietly ("does not deploy from CI - nothing to dispatch") for anything that maps
+    # nowhere. This condition used to repeat that list in YAML, and the copies drifted:
+    # release/** was added to environmentFor and to the callers' push triggers, but not
+    # here, so a release branch built its artifact and then silently skipped its own
+    # deploy. Re-adding a branch list here just re-arms that trap.
     if: |
       always() &&
       github.event_name == 'push' &&
-      (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/')) &&
       (needs.compile.result  == 'success' || needs.compile.result == 'skipped') &&
       (needs.publish.result  == 'success' || needs.publish.result == 'skipped') &&
       needs.unit_test.result != 'failure' &&
