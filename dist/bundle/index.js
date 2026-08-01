@@ -3313,8 +3313,17 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         }
         // ── Sync to S3 ─────────────────────────────────────────────────────────────
         const syncArgs = ['s3', 'sync', `${contentRoot}/`, `s3://${bucket}/`, '--region', region];
-        if (cfg.delete !== false)
+        if (cfg.delete !== false) {
             syncArgs.push('--delete');
+            // Never let --delete remove a config.js this deploy did not produce. Deploying a
+            // branch/artifact from before runtime_config existed (e.g. a hotfix cut from main)
+            // would otherwise WIPE the live config.js and leave the app fetching a 404 with no
+            // API host at all. Keeping the previous one is the strictly safer failure mode.
+            if (!runtimeConfig || Object.keys(runtimeConfig).length === 0) {
+                syncArgs.push('--exclude', 'config.js');
+                core.info('   no runtime_config for this env — keeping the existing config.js in the bucket');
+            }
+        }
         // public-read for legacy ACL-based buckets (objects are private by default, which
         // serves AccessDenied through CloudFront). Only set when the bucket allows ACLs.
         if (acl)
