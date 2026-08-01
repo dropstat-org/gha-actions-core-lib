@@ -8919,12 +8919,16 @@ const FORCE_BUILD_STAGES = [
 // Hotfix needs BUILD_STAGES for CI (build + publish sha-xxx) and PROMOTE_STAGES for CD
 // (promote sha-xxx → :prod + deploy). The PIPELINE_PHASE filter splits them:
 //   phase=ci → HOTFIX_STAGES − CI_DENY = BUILD_STAGES
-//   phase=cd → HOTFIX_STAGES ∩ CD_ALLOW = {release, ecs_deploy}
+//   phase=cd → HOTFIX_STAGES ∩ CD_ALLOW = {release, ecs_deploy, s3_deploy}
 // Hotfix merges directly to main (skips develop) — deploys to prod with approval gate.
+// s3_deploy is listed for the same reason as in PROMOTE_STAGES/FEATURE_STAGES: without
+// it a frontend hotfix produced a CD run with every deploy job skipped — it built the
+// artifact and shipped nothing.
 const HOTFIX_STAGES = [
     ...BUILD_STAGES,
     { name: StageName_1.StageName.RELEASE, required: false },
     { name: StageName_1.StageName.ECS_DEPLOY, required: false },
+    { name: StageName_1.StageName.S3_DEPLOY, required: false },
 ];
 class AppWorkflow extends Workflow_1.Workflow {
     /**
