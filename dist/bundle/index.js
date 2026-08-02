@@ -4384,35 +4384,67 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     // PROMOTION_EVIDENCE promotion gate in ECSDeployStage (prod requires :uat).
     //   develop → :qa    from sha-<feature>
     //   release → :uat   from sha-<feature>
+    //   hotfix  → :dev   from sha-<hotfix>
     //   master  → :prod  from :uat
-    //   hotfix  → :prod  from sha-<hotfix>    (hotfix builds its own image, skips uat)
+    //
+    // The environment is NOT re-derived here: it comes from DEPLOY_ENVIRONMENT_OVERRIDE,
+    // the same value the deploy job used (`needs.config.outputs.deploy_environment`). The
+    // per-branch values above are only the fallback for a caller that does not pass it.
+    //
+    // This used to be decided per branch, independently of the deploy, and the two halves
+    // of a single run disagreed:
+    //   - hotfix deployed to dev but promoted the image to :prod (+stable-sha-xxx), so the
+    //     :prod tag pointed at code that never passed uat and was never deployed to prod;
+    //   - a rollback dispatched on develop with environment=dev deployed to dev but moved
+    //     the :qa tag, because only the separate DEPLOY_TARGET var was consulted.
+    // The deploy was right in both cases; what broke was the truth of the ECR tags - which
+    // is exactly what the promotion gate reads. An environment the deploy never touched
+    // must never have its tag moved.
     async onMaster(stage) {
-        core.info('AppRelease: promoting image to prod (from :uat)');
-        await this.promoteImage(stage, Environment_1.Environment.PROD, Environment_1.Environment.UAT);
-        await this.tagStable(stage);
-        await this.createGitTag();
+        await this.releaseTo(stage, Environment_1.Environment.PROD);
     }
     async onHotfix(stage) {
-        core.info('AppRelease: promoting hotfix image to prod (from sha)');
-        await this.promoteImage(stage, Environment_1.Environment.PROD, this.sourceShaTag());
-        await this.tagStable(stage);
-        await this.createGitTag();
+        await this.releaseTo(stage, Environment_1.Environment.DEV);
     }
     async onDevelop(stage) {
-        // develop deploys to qa by default. DEPLOY_TARGET lets a manual dispatch
-        // (workflow_dispatch on develop) redirect the promotion to another
-        // environment, mirroring ECSDeployStage/S3DeployStage's override support.
-        const target = (process.env.DEPLOY_TARGET ?? '').trim().toLowerCase();
-        const OVERRIDE_ENV = {
-            dev: Environment_1.Environment.DEV, qa: Environment_1.Environment.QA, uat: Environment_1.Environment.UAT, prod: Environment_1.Environment.PROD,
-        };
-        const env = OVERRIDE_ENV[target] ?? Environment_1.Environment.QA;
-        core.info(`AppRelease: promoting image to ${env} (from sha)`);
-        await this.promoteImage(stage, env, this.sourceShaTag());
+        await this.releaseTo(stage, Environment_1.Environment.QA);
     }
     async onRelease(stage) {
-        core.info('AppRelease: promoting image to uat (from sha)');
-        await this.promoteImage(stage, Environment_1.Environment.UAT, this.sourceShaTag());
+        await this.releaseTo(stage, Environment_1.Environment.UAT);
+    }
+    /**
+     * The environment whose tag this release may move: whatever the deploy jobs
+     * targeted. `fallback` is the branch's default, used only when the caller passes
+     * nothing (older callers, and workflow_call paths that predate the env var).
+     *
+     * DEPLOY_TARGET is still read for backwards compatibility - it was the ad-hoc
+     * override this stage used before, and some callers may still set it - but
+     * DEPLOY_ENVIRONMENT_OVERRIDE wins, being the one the deploy itself obeys.
+     */
+    targetEnvironment(fallback) {
+        const OVERRIDE_ENV = {
+            dev: Environment_1.Environment.DEV, qa: Environment_1.Environment.QA, uat: Environment_1.Environment.UAT,
+            prod: Environment_1.Environment.PROD, production: Environment_1.Environment.PROD,
+        };
+        const requested = (process.env.DEPLOY_ENVIRONMENT_OVERRIDE ?? process.env.DEPLOY_TARGET ?? '')
+            .trim().toLowerCase();
+        return OVERRIDE_ENV[requested] ?? fallback;
+    }
+    /**
+     * Promotes the deployed image to `fallback`'s environment tag, or to the one the
+     * deploy actually targeted. prod always promotes forward from :uat - never straight
+     * from a sha - so the tag chain keeps matching what the prod promotion gate demands,
+     * and the permanent stable-sha marker plus the git tag are created there and only there.
+     */
+    async releaseTo(stage, fallback) {
+        const env = this.targetEnvironment(fallback);
+        const source = env === Environment_1.Environment.PROD ? Environment_1.Environment.UAT : this.sourceShaTag();
+        core.info(`AppRelease: promoting image to ${env} (from ${source})`);
+        await this.promoteImage(stage, env, source);
+        if (env !== Environment_1.Environment.PROD)
+            return;
+        await this.tagStable(stage);
+        await this.createGitTag();
     }
     async onPullRequest(_stage) {
         core.info('AppRelease: PR is a Trivy gate only — promotion happens after merge');
@@ -4436,7 +4468,7 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         const shaTag = this.sourceShaTag();
         const stableTag = `stable-${shaTag}`;
         // Source from :prod (the digest just promoted) so the marker always exists,
-        // regardless of how the prod image was sourced (qa for master, sha for hotfix).
+        // rather than re-deriving the digest from whatever :uat happens to point at now.
         await this.archive.moveAndPublish({ ...docker, tag: Environment_1.Environment.PROD }, { ...docker, tag: stableTag });
         core.info(`Tagged ${docker.image}:${stableTag} — permanent prod release marker`);
     }
