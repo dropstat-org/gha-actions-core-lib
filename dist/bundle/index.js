@@ -2891,8 +2891,15 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const isExemptBranch = acceptedTags
             ? await this.isBranchExemptFromGate(projectId, serviceId)
             : false;
+        // Escape hatch is DEPLOY_SKIP_PROMOTION_GATE, deliberately NOT the account-check
+        // one. This used to key off DEPLOY_SKIP_ACCOUNT_CHECK, so a single variable whose
+        // name promises to relax an ACCOUNT assertion silently switched off the promotion
+        // gate as well. Test beds must set the account variable (their environments all
+        // point at the dev account by design), which meant the gate never ran anywhere it
+        // could actually be exercised - it was untestable outside production, which is the
+        // one place you do not want to discover it is wrong.
         if (acceptedTags && imageBase && !isHotfixToProd && !isExemptBranch
-            && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true') {
+            && process.env.DEPLOY_SKIP_PROMOTION_GATE !== 'true') {
             await this.verifyPromotion(imageBase, imageTag, region, acceptedTags, effectiveEnv, ecr);
         }
         // ── 3. Register new task definition revision ──────────────────────────────
