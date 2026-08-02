@@ -3705,6 +3705,7 @@ const core = __importStar(__nccwpck_require__(37484));
 const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const StageName_1 = __nccwpck_require__(90969);
+const ActionsType_1 = __nccwpck_require__(15515);
 const Env_1 = __nccwpck_require__(45188);
 /** Environment a pushed branch deploys to, or null when it deploys nowhere. */
 function environmentFor(ref) {
@@ -3736,6 +3737,21 @@ function handoffKindFor(config) {
 class TriggerCdStage {
     static api = 'https://api.github.com';
     static async run(config) {
+        // Only an app hands a build off to its CD. A terraform repo's CD is triggered by
+        // `workflow_run` on this CI completing, and it declares no workflow_dispatch inputs
+        // at all - there is no artifact to name, because the deploy re-reads the same repo
+        // at the same ref. Dispatching the app payload at it got the whole thing rejected
+        // with 422 "Unexpected inputs provided: [sha_tag, environment]", which failed CI,
+        // which then withheld the very workflow_run success the CD was waiting on - so a
+        // merge to main silently applied nothing.
+        //
+        // The check is on the repo TYPE, not on the stage list like handoffKindFor: the
+        // question here is whether a handoff happens at all, and no combination of stages
+        // makes a terraform repo want one.
+        if (config.type !== ActionsType_1.ActionsType.APP) {
+            core.info(`This is a '${config.type}' repo - its CD is triggered by workflow_run, not dispatched from CI.`);
+            return;
+        }
         const ref = Env_1.Env.ref();
         const environment = environmentFor(ref);
         if (!environment) {
