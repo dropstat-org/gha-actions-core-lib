@@ -6453,11 +6453,24 @@ exports.BUILD_TAG_PREFIX = 'built/sha-';
  * and any later ref resolves it via `git describe`, which walks first-parent
  * ancestry to the nearest such tag regardless of how many merges sit in between.
  *
+ * On a MERGE commit the search starts at the second parent — the side the merge
+ * brought in — not at the merge itself. `git describe` picks the nearest tag by
+ * depth over all reachable history, with no notion of which branch a tag arrived
+ * on, so from a merge commit it can just as easily return something merged in
+ * earlier from an unrelated line of work. That is not hypothetical: after a
+ * hotfix had been merged into main, a later `develop -> main` merge resolved to
+ * the HOTFIX image (sha-73fabe3) instead of the image qa had just validated
+ * (sha-512f6f0), because the hotfix tag sat fewer commits away. The promotion
+ * gate blocked the deploy for lacking ':uat', which is the only reason it did not
+ * ship. What a promotion merge deploys is what it merged in, so that is where the
+ * walk begins.
+ *
  * Priority:
  *   1. IMAGE_SHA env var — workflow passes ${{ github.event.pull_request.head.sha }}
  *      explicitly for pull_request events where GITHUB_SHA is wrong.
- *   2. Nearest reachable `built/sha-*` tag — resolves through any number of
- *      chained promotion merges (requires a non-shallow checkout).
+ *   2. Nearest `built/sha-*` tag reachable from the merged-in side (or from
+ *      GITHUB_SHA itself when it is not a merge) — resolves through any number
+ *      of chained promotion merges (requires a non-shallow checkout).
  *   3. Second parent of a merge commit — legacy fallback for images built
  *      before this tag was introduced, or a shallow checkout without tag history.
  *   4. GITHUB_SHA — correct for feature/* and hotfix/* pushes (direct commits).
@@ -6468,10 +6481,10 @@ function resolveImageSHA() {
     const sha = process.env.GITHUB_SHA ?? '';
     if (!sha)
         return '';
-    const tagged = getNearestBuildTagSHA(sha);
+    const secondParent = getSecondParent(sha);
+    const tagged = getNearestBuildTagSHA(secondParent ?? sha);
     if (tagged)
         return tagged;
-    const secondParent = getSecondParent(sha);
     return secondParent ?? sha;
 }
 /**
