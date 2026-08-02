@@ -2643,14 +2643,31 @@ const EXPECTED_ACCOUNT = {
     [Environment_1.Environment.UAT]: '174917982419',
     [Environment_1.Environment.PROD]: '174917982419',
 };
-// Promotion gate: to reach uat/prod (push-driven OR workflow_dispatch), the
-// image must already carry the ECR tag of the stage before it (qa before uat,
-// uat before prod) — i.e. it was actually promoted through the pipeline, not
-// just built on some branch. Applies to automated deploys too: release/promotion
-// runs AFTER ecs_deploy in the same run, so ordering does not enforce this.
-const REQUIRED_PRIOR_TAG = {
-    [Environment_1.Environment.UAT]: 'qa',
-    [Environment_1.Environment.PROD]: 'uat',
+// Promotion gate: to reach uat/prod (push-driven OR workflow_dispatch), the image
+// must carry ECR tag evidence that the pipeline put it there — not that someone
+// built it on an arbitrary branch and pointed a dispatch at it. Applies to
+// automated deploys too: release/promotion runs AFTER ecs_deploy in the same run,
+// so job ordering does not enforce this; the tag chain is the only real evidence.
+//
+// Each environment lists the tags that satisfy it — ANY one is enough.
+//
+//   prod ← :uat only. A strict forward chain, deliberately unchanged: nothing
+//          reaches production without having actually run in uat first.
+//
+//   uat  ← :qa OR release-sha-xxx. This used to be ':qa' alone, which was wrong
+//          for the branch uat exists to serve. A release branch is an independent
+//          line of work: it is cut from develop and then takes its own fix commits,
+//          and such a commit produces a NEW sha that by definition never passed
+//          through qa, so it can never carry :qa. The strict rule therefore blocked
+//          exactly the case it was meant to allow - shipping a release fix to uat -
+//          and the only ways out were to exempt the branch or to weaken the gate to
+//          nothing. release-sha-xxx is the better answer: PublishStage applies it
+//          only when building on a release/* branch, so it is positive proof of
+//          pipeline provenance rather than an exception to the rule. Prod still
+//          demands :uat, so this widens what may enter uat, never what reaches prod.
+const PROMOTION_EVIDENCE = {
+    [Environment_1.Environment.UAT]: (shaTag) => ['qa', `release-${shaTag}`],
+    [Environment_1.Environment.PROD]: () => ['uat'],
 };
 /**
  * ECSDeployStage — native ECS deployment using task definition registration.
@@ -2665,15 +2682,15 @@ const REQUIRED_PRIOR_TAG = {
  * Branch → Environment mapping (automatic, on every push):
  *   feature/* → dev
  *   develop   → qa
- *   release/* → uat (image must already be the one running in qa — enforced by
- *               the fact that qa only ever gets an image via the develop deploy)
+ *   release/* → uat (either the image already promoted to qa, or one this branch
+ *               built itself — see PROMOTION_EVIDENCE)
  *   main      → prod
  *
  * Manual dispatch (workflow_dispatch) may target ANY of dev/qa/uat/prod directly
  * via DEPLOY_ENVIRONMENT_OVERRIDE, regardless of source branch. The GitHub
  * Environment gate (required reviewers on uat/prod) remains the approval
  * boundary; on top of that, uat/prod additionally require that the requested
- * image already carries the prior stage's ECR tag (see REQUIRED_PRIOR_TAG) —
+ * image already carries tag evidence of pipeline provenance (see PROMOTION_EVIDENCE) —
  * you cannot manually ship a develop-only image straight to uat/prod.
  *
  * Security gate: if ecs_deploy.environment = 'prod' and branch is NOT main → error
@@ -2869,14 +2886,14 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // chain is the only reliable evidence of promotion.
         // Hotfix is the deliberate exception: it builds its own image and ships
         // straight to prod (AppRelease promotes hotfix sha → :prod, skipping uat).
-        const requiredPriorTag = REQUIRED_PRIOR_TAG[effectiveEnv];
+        const acceptedTags = PROMOTION_EVIDENCE[effectiveEnv]?.(imageTag);
         const isHotfixToProd = this.branchType === BranchType_1.BranchType.HOTFIX && effectiveEnv === Environment_1.Environment.PROD;
-        const isExemptBranch = requiredPriorTag
+        const isExemptBranch = acceptedTags
             ? await this.isBranchExemptFromGate(projectId, serviceId)
             : false;
-        if (requiredPriorTag && imageBase && !isHotfixToProd && !isExemptBranch
+        if (acceptedTags && imageBase && !isHotfixToProd && !isExemptBranch
             && process.env.DEPLOY_SKIP_ACCOUNT_CHECK !== 'true') {
-            await this.verifyPromotion(imageBase, imageTag, region, requiredPriorTag, effectiveEnv, ecr);
+            await this.verifyPromotion(imageBase, imageTag, region, acceptedTags, effectiveEnv, ecr);
         }
         // ── 3. Register new task definition revision ──────────────────────────────
         let newArn = '';
@@ -3024,7 +3041,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
      * image itself lives in the shared-services ECR registry — cross-account, so
      * --registry-id is required (mirrors verifyEcrImage's batch-get-image call).
      */
-    async verifyPromotion(repo, shaTag, region, requiredTag, targetEnv, ecrRegistryHost) {
+    async verifyPromotion(repo, shaTag, region, acceptedTags, targetEnv, ecrRegistryHost) {
         const registryId = ecrRegistryHost.split('.')[0];
         let response = '';
         const exitCode = await exec.exec('aws', [
@@ -3048,18 +3065,21 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 tags = [];
             }
         }
-        if (!tags.includes(requiredTag)) {
-            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: deploying to '${targetEnv}' requires an image already promoted ` +
-                `to ':${requiredTag}' (found tags on ${repo}:${shaTag}: ${tags.join(', ') || 'none'}). ` +
-                `Deploy through the normal pipeline to '${requiredTag}' first, or target '${requiredTag}' instead.`);
+        const evidence = acceptedTags.find(t => tags.includes(t));
+        if (!evidence) {
+            const expected = acceptedTags.map(t => `':${t}'`).join(' or ');
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: deploying to '${targetEnv}' requires an image built and promoted by ` +
+                `the pipeline, evidenced by ${expected} (found tags on ${repo}:${shaTag}: ` +
+                `${tags.join(', ') || 'none'}). Deploy through the normal pipeline first, or target ` +
+                `an earlier environment instead.`);
         }
-        core.info(`   Promotion verified: ${repo}:${shaTag} already carries ':${requiredTag}' → manual deploy to ${targetEnv} allowed`);
+        core.info(`   Promotion verified: ${repo}:${shaTag} carries ':${evidence}' → deploy to ${targetEnv} allowed`);
     }
     /**
      * Centrally-managed exception to the promotion gate, mirroring the dso-trivy/
      * dso-checkov/dso-semgrep pattern: dropstat-org/dso-deploy-gate holds a
      * release/{projectId}-{serviceId} branch per service with exempt-branches.txt
-     * listing branches allowed to skip REQUIRED_PRIOR_TAG (e.g. a test branch built
+     * listing branches allowed to skip PROMOTION_EVIDENCE (e.g. a test branch built
      * and shipped straight from release/uat-gha without going through :qa first).
      * Missing repo/branch/file is never an error — the gate runs as normal.
      */
@@ -4316,7 +4336,7 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
     // Build-once promotion (mirrors the Groovy library's Docker.move: prod←uat, uat←sha).
     // develop/release promote directly from the built sha (1 level: the branch's
     // merge second parent); prod promotes forward from :uat, matching the
-    // REQUIRED_PRIOR_TAG promotion gate in ECSDeployStage (prod requires :uat).
+    // PROMOTION_EVIDENCE promotion gate in ECSDeployStage (prod requires :uat).
     //   develop → :qa    from sha-<feature>
     //   release → :uat   from sha-<feature>
     //   master  → :prod  from :uat
@@ -4776,10 +4796,21 @@ class PublishStage extends AbstractStage_1.AbstractStage {
             // and for lifecycle targeting. feature-sha-xxx / hotfix-sha-xxx tags expire after
             // snapshot_expiry_days if the image is never promoted — the base sha-xxx tag is
             // what the CD promotion uses (unchanged).
+            //
+            // release-sha-xxx carries weight the other two do not: it is the uat promotion
+            // gate's evidence that this image was built by the pipeline ON a release branch.
+            // A release is an independent line of work, so a fix commit there produces a sha
+            // that never passed through qa and so can never carry :qa - without this tag the
+            // gate has nothing to check and a legitimate release fix cannot reach uat. Only
+            // the pipeline can apply it (it needs ECR push credentials), which is the same
+            // trust boundary the rest of the promotion chain rests on. Note it is NOT covered
+            // by the feature-/hotfix- lifecycle expiry rules, so it persists - that is
+            // deliberate: it is the audit trail of what a release branch actually shipped.
             const refName = process.env.GITHUB_REF_NAME ?? '';
             const snapshotPrefix = refName.startsWith('feature/') ? 'feature'
                 : refName.startsWith('hotfix/') ? 'hotfix'
-                    : null;
+                    : refName.startsWith('release/') ? 'release'
+                        : null;
             if (snapshotPrefix) {
                 const snapshotTag = `${snapshotPrefix}-${shaTag}`;
                 await this.archive.moveAndPublish({ registry, image, tag: shaTag }, { registry, image, tag: snapshotTag });
@@ -7688,7 +7719,7 @@ class SecurityConfigLoader {
     }
     /**
      * Parses exempt-branches.txt: one branch name (or exact ref) per line, exempting
-     * it from the ECSDeployStage promotion gate (REQUIRED_PRIOR_TAG check).
+     * it from the ECSDeployStage promotion gate (PROMOTION_EVIDENCE check).
      * Comments (#) and blank lines are ignored.
      */
     static parseDeployGateConfig(content) {
