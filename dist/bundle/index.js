@@ -3042,15 +3042,24 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         core.info(`   ECR image verified: ${repoName}:${tag} exists`);
     }
     /**
-     * Manual-dispatch promotion gate: confirms the sha-tagged image already carries
-     * the `requiredTag` (e.g. ':qa' before allowing a manual deploy to uat). Runs
-     * after assumeRole, so credentials are scoped to the target account, but the
-     * image itself lives in the shared-services ECR registry — cross-account, so
-     * --registry-id is required (mirrors verifyEcrImage's batch-get-image call).
+     * Promotion gate: confirms the sha-tagged image already carries one of
+     * `acceptedTags` (e.g. ':qa' or 'release-sha-xxx' before allowing a deploy to
+     * uat). Runs after assumeRole, so credentials are scoped to the target account,
+     * but the image itself lives in the shared-services ECR registry — cross-account,
+     * so --registry-id is required (mirrors verifyEcrImage's batch-get-image call).
+     *
+     * Note this treats a failed describe-images differently from verifyEcrImage just
+     * above, which warns and proceeds on AccessDeniedException. That asymmetry is
+     * deliberate: that one is a convenience check on an image the pipeline just built,
+     * whereas this is the control that keeps an arbitrary image out of uat/prod. It
+     * fails closed. But "no evidence" and "could not read the evidence" must not look
+     * alike in the log — reporting an IAM gap as a failed promotion sends whoever is
+     * on the other end to debug a build pipeline that is working fine.
      */
     async verifyPromotion(repo, shaTag, region, acceptedTags, targetEnv, ecrRegistryHost) {
         const registryId = ecrRegistryHost.split('.')[0];
         let response = '';
+        let stderr = '';
         const exitCode = await exec.exec('aws', [
             'ecr', 'describe-images',
             ...(registryId ? ['--registry-id', registryId] : []),
@@ -3061,16 +3070,29 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             '--output', 'json',
         ], {
             ignoreReturnCode: true,
-            listeners: { stdout: (d) => { response += d.toString(); } },
+            listeners: {
+                stdout: (d) => { response += d.toString(); },
+                stderr: (d) => { stderr += d.toString(); },
+            },
         });
+        if (exitCode !== 0) {
+            const denied = stderr.includes('AccessDeniedException');
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `❌ BLOCKED: cannot evaluate the promotion gate for '${targetEnv}' — ` +
+                `'aws ecr describe-images' on ${repo}:${shaTag} (registry ${registryId}) failed, so the ` +
+                `image's tags could not be read. This is NOT a statement about whether the image was ` +
+                `promoted; the gate fails closed when it cannot see the evidence.` +
+                (denied
+                    ? `\nThe deploy role is missing 'ecr:DescribeImages' on registry ${registryId}. ` +
+                        `Cross-account ECR needs BOTH the registry policy (resource side) and this action in ` +
+                        `the deploy role's own identity policy — granting only one is silently insufficient.`
+                    : `\n${stderr.trim()}`));
+        }
         let tags = [];
-        if (exitCode === 0) {
-            try {
-                tags = JSON.parse(response.trim() || '[]');
-            }
-            catch {
-                tags = [];
-            }
+        try {
+            tags = JSON.parse(response.trim() || '[]');
+        }
+        catch {
+            tags = [];
         }
         const evidence = acceptedTags.find(t => tags.includes(t));
         if (!evidence) {
