@@ -512,6 +512,12 @@ jobs:
           PIPELINE_REF: ${{ needs.config.outputs.resolved_ref || inputs.deploy_ref }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA_TAG: ${{ inputs.sha_tag }}
+          # The environment the deploy jobs actually targeted - the same value passed to
+          # ecs_deploy/s3_deploy. Without it AppRelease re-derived the environment from
+          # the branch, and the two halves of one run disagreed: a hotfix deployed to dev
+          # while moving the :prod tag, and a rollback dispatched to dev moved :qa. The
+          # deploys were right; the ECR tags lied, and the promotion gate reads the tags.
+          DEPLOY_ENVIRONMENT_OVERRIDE: ${{ needs.config.outputs.deploy_environment }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || vars.AWS_ACCOUNT_ID }}
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_IMAGE_ORG: ${{ vars.ECR_IMAGE_ORG }}
