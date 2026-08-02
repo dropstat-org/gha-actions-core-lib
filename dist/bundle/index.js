@@ -3700,6 +3700,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.TriggerCdStage = void 0;
 exports.environmentFor = environmentFor;
+exports.buildsItsOwnImage = buildsItsOwnImage;
 exports.handoffKindFor = handoffKindFor;
 const core = __importStar(__nccwpck_require__(37484));
 const ActionYaml_1 = __nccwpck_require__(9192);
@@ -3723,6 +3724,26 @@ function environmentFor(ref) {
     if (branch.startsWith('release/'))
         return 'uat';
     return null;
+}
+/**
+ * Whether a push to this branch produces its own image.
+ *
+ * Under build-once only the lower branches compile: feature and hotfix build what
+ * they wrote, and release/** builds its own fix commits (a release branch is an
+ * independent line of work, and such a commit has no prior build). develop and main
+ * promote an image that already exists - their own commit was never built, and asking
+ * ECR for `sha-<merge commit>` gets ImageNotFound.
+ *
+ * That distinction only started to matter once the CD could be dispatch-only: a
+ * push-driven CD arrived with an empty sha_tag and resolved the image itself
+ * (resolveImageSHA -> the merge's second parent, or the built/ tag). Naming the sha
+ * from CI overrode that resolution with a commit that has no image.
+ */
+function buildsItsOwnImage(ref) {
+    const branch = ref.replace(/^refs\/heads\//, '');
+    return branch.startsWith('feature/')
+        || branch.startsWith('hotfix/')
+        || branch.startsWith('release/');
 }
 /**
  * Which kind of handoff this repo's action.yaml describes.
@@ -3760,10 +3781,18 @@ class TriggerCdStage {
         }
         const kind = handoffKindFor(config);
         core.info(`${Env_1.Env.refName()} deploys to ${environment}; this repo promotes by ${kind}.`);
+        // Naming the sha is only right when this branch built it. On develop/main the push
+        // commit has no image of its own, so the tag is left empty and the CD resolves the
+        // image it is promoting - the same path a push-driven CD always took. Sending
+        // `sha-<merge commit>` there just makes the deploy fail with ECR_IMAGE_NOT_FOUND.
+        const buildsOwn = buildsItsOwnImage(ref);
         const inputs = {
-            sha_tag: `sha-${Env_1.Env.sha()}`,
+            sha_tag: buildsOwn ? `sha-${Env_1.Env.sha()}` : '',
             environment,
         };
+        if (!buildsOwn) {
+            core.info(`${Env_1.Env.refName()} promotes an existing image - leaving sha_tag empty for the CD to resolve.`);
+        }
         // Only an artifact handoff needs to name a run. For an image handoff the tag IS
         // the identity, so resolving a run id would be work done to produce a value the
         // CD has no input for.
