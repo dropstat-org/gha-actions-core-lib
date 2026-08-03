@@ -68,6 +68,12 @@ jobs:
         uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: config
+        env:
+          # NeutralCheckReporter posts a `neutral` check run for a soft-failed or
+          # missing quality stage. `checks: write` on the caller is only half of it:
+          # without the token the action has nothing to authenticate with and degrades
+          # to a log warning that scrolls away.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── App / Library build stages ──────────────────────────────────────────────
 
@@ -124,6 +130,12 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: unit_test
+        env:
+          # NeutralCheckReporter posts a `neutral` check run for a soft-failed or
+          # missing quality stage. `checks: write` on the caller is only half of it:
+          # without the token the action has nothing to authenticate with and degrades
+          # to a log warning that scrolls away.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   linter:
     name: Linter
@@ -144,6 +156,12 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: linter
+        env:
+          # NeutralCheckReporter posts a `neutral` check run for a soft-failed or
+          # missing quality stage. `checks: write` on the caller is only half of it:
+          # without the token the action has nothing to authenticate with and degrades
+          # to a log warning that scrolls away.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   semgrep:
     name: Semgrep
