@@ -913,6 +913,7 @@ const WorkflowFactory_1 = __nccwpck_require__(20265);
 const StageRegistry_1 = __nccwpck_require__(38600);
 const OutputWriter_1 = __nccwpck_require__(73021);
 const QualityStageInjector_1 = __nccwpck_require__(70934);
+const SemgrepToggle_1 = __nccwpck_require__(99528);
 const BranchDetector_1 = __nccwpck_require__(90609);
 const StageName_1 = __nccwpck_require__(90969);
 const ValidateApproverStage_1 = __nccwpck_require__(18487);
@@ -935,6 +936,10 @@ async function run() {
         // in OutputWriter: the config job and the stage job parse action.yaml
         // separately, and both have to see the same stage list.
         await QualityStageInjector_1.QualityStageInjector.inject(config, branchType, workflow);
+        // Same shared-path reasoning, opposite direction: dso-semgrep can switch the
+        // mandatory semgrep stage off for a repo. Runs after the injection so the final
+        // stage list both jobs see is identical.
+        await SemgrepToggle_1.SemgrepToggle.apply(config);
         workflow.checkStages(config.stages, branchType);
         if (stageName === StageName_1.StageName.CONFIG) {
             await OutputWriter_1.OutputWriter.writeFlags(config, branchType, workflow);
@@ -1721,15 +1726,23 @@ class SemgrepStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             // ── Load per-project exceptions from dso-semgrep repo ───────────────────
             // Branch: release/{projectId}  File: .semgrepignore
             // Semgrep reads .semgrepignore automatically from the working directory.
+            // The `# enabled: false` directive is handled earlier, on the shared config path
+            // (SemgrepToggle), so the stage never reaches this point when it is switched off.
             const semgrepIgnore = await SecurityConfigLoader_1.SecurityConfigLoader.fetchSemgrepIgnore(this.config.metadata.projectId, this.config.metadata.serviceId);
+            let dsoSoftFail;
             if (semgrepIgnore) {
-                (__nccwpck_require__(79896).writeFileSync)('.semgrepignore', semgrepIgnore, 'utf8');
+                const { patterns, softFail } = SecurityConfigLoader_1.SecurityConfigLoader.parseSemgrepIgnore(semgrepIgnore);
+                dsoSoftFail = softFail;
+                // Directive comments are stripped: they are ours, not semgrep's.
+                (__nccwpck_require__(79896).writeFileSync)('.semgrepignore', patterns.join('\n'), 'utf8');
                 core.info('[SecurityConfigLoader] .semgrepignore applied from dso-semgrep');
             }
             const semgrepConfig = stage.semgrep?.config ?? DEFAULT_CONFIG;
             const extraArgs = stage.semgrep?.args ?? [];
-            // action.yaml softFail overrides platform config when explicitly set
-            const softFail = stage.semgrep?.softFail !== undefined ? stage.semgrep.softFail : SOFT_FAIL;
+            // Priority: action.yaml explicit > dso-semgrep directive > platform policy
+            const softFail = stage.semgrep?.softFail !== undefined ? stage.semgrep.softFail
+                : dsoSoftFail !== undefined ? dsoSoftFail
+                    : SOFT_FAIL;
             // Scan 1: text output for log (determines pass/fail)
             // --error exits with code 1 when findings exist; omitting it exits 0 (soft-fail behaviour)
             const tableArgs = [
@@ -8424,6 +8437,51 @@ class SecurityConfigLoader {
     static async fetchSemgrepIgnore(projectId, serviceId) {
         return this.fetch('dso-semgrep', projectId, serviceId, '.semgrepignore');
     }
+    /**
+     * Parses .semgrepignore, splitting the ignore patterns from the directive comments.
+     *
+     * Two directives are understood, both written as comments so the file stays a valid
+     * .semgrepignore that semgrep itself can read verbatim:
+     *
+     *   # enabled: false     → the semgrep stage is not run at all for this repo
+     *   # soft_fail: true    → semgrep runs and reports, but findings do not break the build
+     *
+     * `enabled: false` is the kill switch. It lives here, next to the exceptions, and not
+     * in action.yaml on purpose: semgrep is a mandatory stage, so a repo must not be able
+     * to turn it off by editing its own config. Flipping it is a change in dso-semgrep,
+     * on that repo's own branch, reviewable like any other security exception.
+     */
+    static parseSemgrepIgnore(content) {
+        const patterns = [];
+        let enabled;
+        let softFail;
+        for (const raw of content.split('\n')) {
+            const directive = raw.trim().match(/^#\s*(enabled|soft_fail):\s*(true|false)\s*$/i);
+            if (directive) {
+                const value = directive[2].toLowerCase() === 'true';
+                if (directive[1].toLowerCase() === 'enabled')
+                    enabled = value;
+                else
+                    softFail = value;
+                continue;
+            }
+            patterns.push(raw);
+        }
+        return { patterns, enabled, softFail };
+    }
+    /**
+     * True when dso-semgrep explicitly disables semgrep for this repo.
+     *
+     * Anything else — no repo, no branch, no file, no directive, a network hiccup —
+     * means enabled. Failing open here would be a security tool that silently stops
+     * running the day the config repo has a bad minute.
+     */
+    static async isSemgrepDisabled(projectId, serviceId) {
+        const content = await this.fetchSemgrepIgnore(projectId, serviceId);
+        if (content === null)
+            return false;
+        return this.parseSemgrepIgnore(content).enabled === false;
+    }
     static async fetchDeployGateConfig(projectId, serviceId) {
         return this.fetch('dso-deploy-gate', projectId, serviceId, 'exempt-branches.txt');
     }
@@ -8487,6 +8545,82 @@ class SecurityConfigLoader {
 }
 exports.SecurityConfigLoader = SecurityConfigLoader;
 //# sourceMappingURL=SecurityConfigLoader.js.map
+
+/***/ }),
+
+/***/ 99528:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SemgrepToggle = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const StageName_1 = __nccwpck_require__(90969);
+const SecurityConfigLoader_1 = __nccwpck_require__(76560);
+/**
+ * Removes the semgrep stage when dso-semgrep disables it for this repo
+ * (`# enabled: false` in .semgrepignore, branch release/{projectId}-{serviceId}).
+ *
+ * Semgrep is injected by injectMandatoryStages, so dropping it from action.yaml does
+ * nothing — which is the point: a repo cannot opt out of a mandatory security stage by
+ * editing its own config. The off switch lives in dso-semgrep, alongside the exceptions
+ * it already governs, and is reviewed there.
+ *
+ * This runs on the SHARED config path, not inside SemgrepStage, for the same reason
+ * QualityStageInjector does: the config job and the stage job parse action.yaml
+ * separately and both have to end up with the same stage list. Removing the stage here
+ * makes `semgrep_enabled` false, so the job is skipped by its `if:` and never allocates
+ * a runner — as opposed to booting one just to exit early. Skipped is not failure, so
+ * the publish / trigger_cd gates (`needs.semgrep.result != 'failure'`) stay satisfied.
+ */
+class SemgrepToggle {
+    static async apply(config) {
+        if (!config.stages.some(s => s.name === StageName_1.StageName.SEMGREP))
+            return;
+        const { projectId, serviceId } = config.metadata;
+        if (!(await SecurityConfigLoader_1.SecurityConfigLoader.isSemgrepDisabled(projectId, serviceId)))
+            return;
+        config.stages = config.stages.filter(s => s.name !== StageName_1.StageName.SEMGREP);
+        core.warning(`[semgrep] disabled for ${projectId}-${serviceId} by dso-semgrep ` +
+            `(# enabled: false in .semgrepignore, branch release/${projectId}-${serviceId}) — stage skipped`);
+    }
+}
+exports.SemgrepToggle = SemgrepToggle;
+//# sourceMappingURL=SemgrepToggle.js.map
 
 /***/ }),
 
