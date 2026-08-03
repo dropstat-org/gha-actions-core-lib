@@ -1828,6 +1828,7 @@ const core = __importStar(__nccwpck_require__(37484));
 const exec = __importStar(__nccwpck_require__(95236));
 const fs = __importStar(__nccwpck_require__(79896));
 const AbstractAnalyzerStage_1 = __nccwpck_require__(69751);
+const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const Credentials_1 = __nccwpck_require__(18753);
@@ -1836,29 +1837,82 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     resultMap() {
         return { 0: 'success', 1: 'failure', 2: 'warning' };
     }
+    /**
+     * True when `sonar-scanner` is on PATH and actually runs.
+     *
+     * Never throws. @actions/exec rejects rather than returning a code when the file is
+     * missing ("Unable to locate executable file: sonar-scanner"), and it can also fail
+     * on a present-but-broken install: dangling symlink, missing exec bit, or a JRE the
+     * bundle expects and the runner does not have. All of those are the same answer here.
+     */
+    async scannerWorks(version) {
+        try {
+            const out = await exec.getExecOutput('sonar-scanner', ['--version'], { ignoreReturnCode: true, silent: true });
+            return out.exitCode === 0 && (out.stdout + out.stderr).includes(version);
+        }
+        catch {
+            return false;
+        }
+    }
     async install() {
         const { sonarqube_scanner: version } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
-        // Skip the download when the right version is already there. Same guard TrivyStage
-        // has: on a self-hosted runner /opt survives between jobs, so the install ran on
-        // top of itself every time.
-        const existing = await exec.getExecOutput('sonar-scanner', ['--version'], { ignoreReturnCode: true, silent: true });
-        if (existing.exitCode === 0 && (existing.stdout + existing.stderr).includes(version)) {
-            Logger_1.Logger.info(`sonar-scanner ${version} already installed - skipping download`);
+        await this.place(version);
+        // Verify rather than assume. Everything above is filesystem plumbing that CAN
+        // succeed while leaving something unusable; the only proof is running it. One
+        // forced reinstall covers the realistic corruption cases (interrupted job,
+        // half-written /opt, symlink pointing at a directory someone cleaned up) and
+        // then we stop, because a second identical failure is an environment problem
+        // that retrying will not fix - and a silent fall-through would surface as the
+        // scan itself failing, which reads like a code-quality gate, not a broken tool.
+        if (await this.scannerWorks(version))
             return;
+        Logger_1.Logger.warn(`sonar-scanner ${version} did not run after install - reinstalling from scratch`);
+        await this.place(version, true);
+        if (!(await this.scannerWorks(version))) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.EXECUTION_FAILED, `sonar-scanner ${version} is not runnable after a clean reinstall. This is the ` +
+                `runner, not the code: check that /opt is writable, that a JRE is available, ` +
+                `and that /usr/local/bin is on PATH.`);
         }
-        Logger_1.Logger.info(`Installing sonar-scanner ${version}...`);
-        const url = `https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${version}-linux-x64.zip`;
-        await exec.exec('curl', ['-sSLo', '/tmp/sonar.zip', url]);
-        await exec.exec('rm', ['-rf', `/tmp/sonar-scanner-${version}-linux-x64`]);
-        await exec.exec('unzip', ['-q', '/tmp/sonar.zip', '-d', '/tmp']);
-        // `mv` onto an existing directory does not replace it - it moves the source
-        // INSIDE it, and across filesystems (/tmp -> /opt is its own mount on the
-        // runner) that degrades to copy+rmdir and dies with
-        // "unable to remove target: Directory not empty". Clear the target first so a
-        // version bump, or a half-finished earlier install, cannot wedge the stage.
-        await exec.exec('sudo', ['rm', '-rf', '/opt/sonar-scanner']);
-        await exec.exec('sudo', ['mv', `/tmp/sonar-scanner-${version}-linux-x64`, '/opt/sonar-scanner']);
-        await exec.exec('sudo', ['ln', '-sf', '/opt/sonar-scanner/bin/sonar-scanner', '/usr/local/bin/sonar-scanner']);
+    }
+    /**
+     * Puts the scanner on disk and points the symlink at it.
+     * `force` skips the "already there" shortcut and always re-downloads.
+     */
+    async place(version, force = false) {
+        // Install to a VERSIONED directory and point a symlink at it. That is what makes
+        // this idempotent: "is it already there" becomes a plain existence check on a path
+        // that can only hold one version, so a version bump installs alongside instead of
+        // fighting for the same directory.
+        //
+        // The shortcut is fs.existsSync, deliberately not `sonar-scanner --version`:
+        // probing by running it cannot distinguish "not installed yet" from "broken",
+        // and on a clean box @actions/exec throws outright. Running it is the
+        // VERIFICATION step in install(), after the file is in place - not the gate on
+        // whether to download.
+        const home = `/opt/sonar-scanner-${version}`;
+        const bin = `${home}/bin/sonar-scanner`;
+        if (!force && fs.existsSync(bin)) {
+            Logger_1.Logger.info(`sonar-scanner ${version} already installed at ${home} - skipping download`);
+        }
+        else {
+            Logger_1.Logger.info(`Installing sonar-scanner ${version}...`);
+            const url = `https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${version}-linux-x64.zip`;
+            await exec.exec('curl', ['-sSLo', '/tmp/sonar.zip', url]);
+            await exec.exec('rm', ['-rf', `/tmp/sonar-scanner-${version}-linux-x64`]);
+            await exec.exec('unzip', ['-q', '/tmp/sonar.zip', '-d', '/tmp']);
+            // `mv` onto an existing directory does not replace it - it moves the source
+            // INSIDE it, and across filesystems (/tmp -> /opt is its own mount on the
+            // runner) that degrades to copy+rmdir and dies with "unable to remove target:
+            // Directory not empty". Clearing the target first also cleans up a half-finished
+            // earlier install, which would otherwise leave a directory that exists but has
+            // no bin/sonar-scanner and wedge every later run.
+            await exec.exec('sudo', ['rm', '-rf', home]);
+            await exec.exec('sudo', ['mv', `/tmp/sonar-scanner-${version}-linux-x64`, home]);
+        }
+        // Always re-pointed, never conditional: the symlink is cheap, and a runner whose
+        // /usr/local/bin was rebuilt (or which still points at an older install) is
+        // otherwise indistinguishable from a correctly installed one.
+        await exec.exec('sudo', ['ln', '-sfn', bin, '/usr/local/bin/sonar-scanner']);
     }
     async run(stage) {
         const end = this.startGroup(`sonarqube: ${stage.name}`);
