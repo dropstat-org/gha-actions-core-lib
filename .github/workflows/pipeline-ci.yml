@@ -226,6 +226,12 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: trivy
+        env:
+          # SecurityConfigLoader fetches this repo's exceptions from dso-trivy /
+          # dso-checkov. Without a token the call is anonymous and shares the
+          # 60/hour per-IP limit with everything else on the runner: a 403 drops
+          # the exceptions and the scan fails on CVEs that were already accepted.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   checkov:
     name: Checkov
@@ -238,6 +244,12 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: checkov
+        env:
+          # SecurityConfigLoader fetches this repo's exceptions from dso-trivy /
+          # dso-checkov. Without a token the call is anonymous and shares the
+          # 60/hour per-IP limit with everything else on the runner: a 403 drops
+          # the exceptions and the scan fails on CVEs that were already accepted.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
     name: Publish
