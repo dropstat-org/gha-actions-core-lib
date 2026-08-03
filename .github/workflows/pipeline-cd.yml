@@ -224,7 +224,7 @@ jobs:
       needs.plan.result != 'failure' &&
       needs.pre_deploy.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       issues: write
     steps:
@@ -238,7 +238,14 @@ jobs:
           app-id: ${{ secrets.CD_APPROVAL_APP_ID }}
           private-key: ${{ secrets.CD_APPROVAL_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+      # continue-on-error: el paso falla por DOS causas muy distintas -- un humano
+      # que escribio "denied", o un 5xx de la API de GitHub. El 2026-08-03 fue lo
+      # segundo: el gate creo el issue #5451 y murio en el POST del comentario
+      # decorativo (500), matando un deploy ya aprobable. El paso siguiente separa
+      # los dos casos ANTES de decidir si se reintenta.
       - name: Manual approval gate
+        id: gate
+        continue-on-error: true
         uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
         with:
           secret: ${{ steps.app-token.outputs.token || github.token }}
@@ -246,6 +253,61 @@ jobs:
           minimum-approvals: 1
           issue-title: "Aprobar deploy terraform: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
           issue-body: "Revisa el plan del CI antes de aprobar. Comenta approved para aplicar o denied para cancelar."
+          exclude-workflow-initiator-as-approver: false
+
+      - name: Classify the gate failure
+        id: verdict
+        if: steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          TITLE: "Aprobar deploy terraform: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # La pregunta no es "cuanto tardo en fallar" -- esa heuristica confunde una
+          # denegacion rapida con una caida. La pregunta es si alguien escribio la
+          # palabra: se lee el issue que este mismo job acaba de abrir.
+          num=$(gh api "repos/$REPO/issues?state=all&sort=created&direction=desc&per_page=50" \
+                  --jq "[.[] | select(.title == \"$TITLE\")] | first | .number // empty")
+
+          if [ -z "$num" ]; then
+            # Ni siquiera llego a crear el issue: no hubo nada que denegar.
+            echo "No se encontro el issue de aprobacion - la falla es anterior a la votacion."
+            echo "denied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          by=$(gh api "repos/$REPO/issues/$num/comments" --paginate \
+                 --jq '[.[] | select((.body | ascii_downcase | gsub("^\\s+|\\s+$";"")) as $b
+                        | $b == "denied" or $b == "deny" or $b == "no")] | last | .user.login // empty')
+
+          if [ -n "$by" ]; then
+            echo "Denegado por $by en el issue #$num."
+            echo "denied=true"  >> "$GITHUB_OUTPUT"
+            echo "by=$by"       >> "$GITHUB_OUTPUT"
+          else
+            echo "Issue #$num sin denegacion: el gate se cayo solo."
+            echo "denied=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Human denial - stop here
+        if: steps.gate.outcome == 'failure' && steps.verdict.outputs.denied == 'true'
+        run: |
+          echo "::error::Deploy denegado por ${{ steps.verdict.outputs.by }} en el issue de aprobacion. No se reintenta."
+          exit 1
+
+      # Solo se llega aca si NO hubo denegacion: el gate se cayo solo. Se abre un
+      # issue nuevo y se vuelve a esperar la aprobacion -- no se da por aprobado nada.
+      - name: Manual approval gate (retry)
+        if: steps.gate.outcome == 'failure' && steps.verdict.outputs.denied != 'true'
+        uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
+        with:
+          secret: ${{ steps.app-token.outputs.token || github.token }}
+          approvers: ${{ vars.CD_APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "Aprobar deploy terraform (reintento): ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          issue-body: "El gate anterior se cayo por un error transitorio de la API de GitHub, no por una denegacion. Comenta approved para aplicar o denied para cancelar."
           exclude-workflow-initiator-as-approver: false
 
   # ── Review gate (app): ECS/S3 deploys a uat/prod requieren aprobacion manual ──
@@ -267,7 +329,7 @@ jobs:
        needs.config.outputs.deploy_environment == 'uat' ||
        needs.config.outputs.deploy_environment == 'prod')
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       issues: write
     steps:
@@ -278,7 +340,12 @@ jobs:
           app-id: ${{ secrets.CD_APPROVAL_APP_ID }}
           private-key: ${{ secrets.CD_APPROVAL_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+      # Ver el comentario del gate de terraform: continue-on-error + clasificacion
+      # explicita, porque el paso falla igual por una denegacion humana que por un
+      # 5xx de la API, y reintentar a ciegas reabriria una compuerta ya cerrada.
       - name: Manual approval gate
+        id: gate
+        continue-on-error: true
         uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
         with:
           secret: ${{ steps.app-token.outputs.token || github.token }}
@@ -286,6 +353,55 @@ jobs:
           minimum-approvals: 1
           issue-title: "Aprobar deploy app (${{ needs.config.outputs.deploy_environment }}): ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
           issue-body: "Deploy ECS/S3 a ${{ needs.config.outputs.deploy_environment }}. Comenta approved para desplegar o denied para cancelar."
+          exclude-workflow-initiator-as-approver: false
+
+      - name: Classify the gate failure
+        id: verdict
+        if: steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          TITLE: "Aprobar deploy app (${{ needs.config.outputs.deploy_environment }}): ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          num=$(gh api "repos/$REPO/issues?state=all&sort=created&direction=desc&per_page=50" \
+                  --jq "[.[] | select(.title == \"$TITLE\")] | first | .number // empty")
+
+          if [ -z "$num" ]; then
+            echo "No se encontro el issue de aprobacion - la falla es anterior a la votacion."
+            echo "denied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          by=$(gh api "repos/$REPO/issues/$num/comments" --paginate \
+                 --jq '[.[] | select((.body | ascii_downcase | gsub("^\\s+|\\s+$";"")) as $b
+                        | $b == "denied" or $b == "deny" or $b == "no")] | last | .user.login // empty')
+
+          if [ -n "$by" ]; then
+            echo "Denegado por $by en el issue #$num."
+            echo "denied=true"  >> "$GITHUB_OUTPUT"
+            echo "by=$by"       >> "$GITHUB_OUTPUT"
+          else
+            echo "Issue #$num sin denegacion: el gate se cayo solo."
+            echo "denied=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Human denial - stop here
+        if: steps.gate.outcome == 'failure' && steps.verdict.outputs.denied == 'true'
+        run: |
+          echo "::error::Deploy denegado por ${{ steps.verdict.outputs.by }} en el issue de aprobacion. No se reintenta."
+          exit 1
+
+      - name: Manual approval gate (retry)
+        if: steps.gate.outcome == 'failure' && steps.verdict.outputs.denied != 'true'
+        uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
+        with:
+          secret: ${{ steps.app-token.outputs.token || github.token }}
+          approvers: ${{ vars.CD_APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "Aprobar deploy app (${{ needs.config.outputs.deploy_environment }}) - reintento: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          issue-body: "El gate anterior se cayo por un error transitorio de la API de GitHub, no por una denegacion. Comenta approved para desplegar o denied para cancelar."
           exclude-workflow-initiator-as-approver: false
 
   # ── Deploy (terraform apply) ─────────────────────────────────────────────────
