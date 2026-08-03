@@ -2259,6 +2259,8 @@ const exec = __importStar(__nccwpck_require__(95236));
 const ArtifactHandler_1 = __nccwpck_require__(38069);
 const SummaryWriter_1 = __nccwpck_require__(812);
 const Logger_1 = __nccwpck_require__(26747);
+const Env_1 = __nccwpck_require__(45188);
+const NeutralCheckReporter_1 = __nccwpck_require__(64691);
 class AbstractStage {
     config;
     artifactHandler = new ArtifactHandler_1.ArtifactHandler();
@@ -2306,8 +2308,27 @@ class AbstractStage {
         catch (err) {
             if (!stage.quality?.softFail)
                 throw err;
+            const message = err.message;
             Logger_1.Logger.warn(`${stage.name} failed but is configured as soft-fail in dso-quality ` +
-                `(source: ${stage.quality.source}) — reporting only: ${err.message}`);
+                `(source: ${stage.quality.source}) — reporting only: ${message}`);
+            // The log warning scrolls away; the neutral check run is what stays visible
+            // on the PR without blocking it. Best-effort — never lets a warning fail a build.
+            await NeutralCheckReporter_1.NeutralCheckReporter.report(stage.name, `${stage.name} failed (soft-fail: the pipeline was not stopped)`, [
+                `\`${stage.name}\` did not pass, but it is configured as soft-fail`,
+                `(source: **${stage.quality.source}**), so the job was kept green and the`,
+                `deploy gates were left untouched.`,
+                '',
+                '```',
+                message,
+                '```',
+                '',
+                `Commands:`,
+                ...commands.map(c => `- \`${c}\``),
+                '',
+                `To make this stage block the pipeline, set \`soft_fail: false\` for it in`,
+                `[dso-quality](${Env_1.Env.serverUrl()}/${Env_1.Env.repositoryOwner()}/dso-quality)`,
+                `on branch \`release/{projectId}-{serviceId}\`.`,
+            ].join('\n'));
         }
     }
     _buildEnv(tools) {
@@ -6790,6 +6811,96 @@ class Logger {
 }
 exports.Logger = Logger;
 //# sourceMappingURL=Logger.js.map
+
+/***/ }),
+
+/***/ 64691:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.NeutralCheckReporter = void 0;
+const fs_1 = __nccwpck_require__(79896);
+const github_1 = __nccwpck_require__(93228);
+const Credentials_1 = __nccwpck_require__(18753);
+const Env_1 = __nccwpck_require__(45188);
+const Logger_1 = __nccwpck_require__(26747);
+/**
+ * Publishes a `neutral` check run for a quality stage that failed under soft-fail.
+ *
+ * GitHub gives a job exactly four conclusions — success, failure, cancelled,
+ * skipped — and none of them means "look at this, but carry on". `failure` is not
+ * an option: `publish` and `trigger_cd` gate on `needs.<stage>.result != 'failure'`,
+ * so a red unit_test job would stop every deploy in the org the day the stage was
+ * turned on. So the JOB stays green and the alert is published as a check run of
+ * its own, which GitHub renders in the PR's check list as not-passing and does not
+ * count against merge (a neutral conclusion never blocks, even when the check is
+ * required). That is the only "warning" state the platform actually has.
+ *
+ * Everything here is best-effort. A repo whose caller workflow has not granted
+ * `checks: write` simply gets the log warning it already got — reporting a warning
+ * must never be able to fail a build.
+ */
+class NeutralCheckReporter {
+    static async report(stageName, title, details) {
+        const token = Credentials_1.Credentials.ghToken();
+        if (!token) {
+            Logger_1.Logger.info(`No token available — skipping the neutral check run for ${stageName}`);
+            return;
+        }
+        const { owner, name: repo } = Env_1.Env.repositoryParts();
+        try {
+            await (0, github_1.getOctokit)(token).request('POST /repos/{owner}/{repo}/check-runs', {
+                owner,
+                repo,
+                name: `quality / ${stageName}`,
+                head_sha: this.headSha(),
+                status: 'completed',
+                conclusion: 'neutral',
+                output: {
+                    title,
+                    // Truncated: the Checks API rejects a summary over 65535 chars, and the
+                    // tail of a build log is where the actual error is.
+                    summary: this.truncate(details),
+                },
+            });
+            Logger_1.Logger.info(`Reported ${stageName} as a neutral check run (does not block the merge)`);
+        }
+        catch (err) {
+            Logger_1.Logger.warn(`Could not publish the neutral check run for ${stageName} — the caller workflow ` +
+                `likely needs 'checks: write'. The failure is still in the log above. ` +
+                `(${err.message})`);
+        }
+    }
+    /**
+     * On a pull_request event GITHUB_SHA is the throwaway merge commit, and a check
+     * attached to it shows up nowhere. The PR head sha is what the checks list reads.
+     */
+    static headSha() {
+        const path = Env_1.Env.get('GITHUB_EVENT_PATH');
+        if (path) {
+            try {
+                const payload = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
+                const sha = payload.pull_request?.head?.sha;
+                if (sha)
+                    return sha;
+            }
+            catch {
+                /* fall through to GITHUB_SHA */
+            }
+        }
+        return Env_1.Env.sha();
+    }
+    static truncate(text) {
+        const LIMIT = 60_000;
+        if (text.length <= LIMIT)
+            return text;
+        return `...(truncated)\n${text.slice(-LIMIT)}`;
+    }
+}
+exports.NeutralCheckReporter = NeutralCheckReporter;
+//# sourceMappingURL=NeutralCheckReporter.js.map
 
 /***/ }),
 
