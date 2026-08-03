@@ -249,15 +249,23 @@ jobs:
           exclude-workflow-initiator-as-approver: false
 
   # ── Review gate (app): ECS/S3 deploys a uat/prod requieren aprobacion manual ──
-  # Mismo mecanismo issue-approval que terraform. dev/qa NO se gatean (skipped).
-  # Aplica cuando el env ruteado (branch u override manual) es uat o prod.
+  # Mismo mecanismo issue-approval que terraform. dev NO se gatea (skipped).
+  # Aplica cuando el env ruteado (branch u override manual) es qa, uat o prod.
+  #
+  # qa se sumo tras el incidente del 2026-08-03: qa desplegaba una imagen 20
+  # commits atrasada y nadie lo noto en tres dias, porque ningun humano miraba
+  # el deploy. El gate no habria resuelto la causa, pero pone un par de ojos
+  # sobre el sha que se va a desplegar antes de que llegue al ambiente donde QA
+  # certifica.
   approval_app:
-    name: Approval (app uat/prod)
+    name: Approval (app qa/uat/prod)
     needs: [config]
     if: |
       needs.config.outputs.ActionsCoreLib_type != 'terraform' &&
       (needs.config.outputs.ecs_deploy_enabled == 'true' || needs.config.outputs.s3_deploy_enabled == 'true') &&
-      (needs.config.outputs.deploy_environment == 'uat' || needs.config.outputs.deploy_environment == 'prod')
+      (needs.config.outputs.deploy_environment == 'qa' ||
+       needs.config.outputs.deploy_environment == 'uat' ||
+       needs.config.outputs.deploy_environment == 'prod')
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 30
     permissions:
