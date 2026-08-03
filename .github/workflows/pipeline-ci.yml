@@ -79,23 +79,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
-      - name: Setup Java
-        if: needs.config.outputs.tools_java != ''
-        uses: actions/setup-java@v4
+      - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-toolchain@main
         with:
-          distribution: temurin
-          java-version: ${{ needs.config.outputs.tools_java }}
-      - name: Setup Maven
-        if: needs.config.outputs.tools_maven != ''
-        uses: stCarolas/setup-maven@v5
-        with:
-          maven-version: ${{ needs.config.outputs.tools_maven }}
-      - name: Setup Flutter
-        if: needs.config.outputs.tools_flutter != ''
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ needs.config.outputs.tools_flutter }}
-          cache: true
+          java:    ${{ needs.config.outputs.tools_java }}
+          maven:   ${{ needs.config.outputs.tools_maven }}
+          flutter: ${{ needs.config.outputs.tools_flutter }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: compile
@@ -126,6 +114,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
+      # unit_test runs in its own fresh runner: compile's toolchain does not carry
+      # over. Without this the stage runs `mvn test` on the runner's default JDK.
+      - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-toolchain@main
+        with:
+          java:    ${{ needs.config.outputs.tools_java }}
+          maven:   ${{ needs.config.outputs.tools_maven }}
+          flutter: ${{ needs.config.outputs.tools_flutter }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: unit_test
@@ -141,6 +136,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
+      - uses: dropstat-org/gha-actions-core-lib/.github/actions/setup-toolchain@main
+        with:
+          java:    ${{ needs.config.outputs.tools_java }}
+          maven:   ${{ needs.config.outputs.tools_maven }}
+          flutter: ${{ needs.config.outputs.tools_flutter }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: linter
