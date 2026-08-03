@@ -9,7 +9,14 @@
 #
 # Shows TARGET ENV in every case, kept SHORT (GitHub expressions cannot
 # truncate the 40-char sha, so the full sha stays OUT of the title — the exact
-# artifact is in the run's commit link and in the deploy job summary):
+# artifact is in the run's commit link and in the deploy job summary).
+#
+# NEVER interpolate `github.sha` or `workflow_run.head_sha` here, not even as the
+# `sha_tag ||` fallback: at 40 chars they push the env and the branch — the two
+# things this title exists for — off the end of the row. Use a literal ('commit').
+# `sha_tag` itself is safe: TriggerCdStage dispatches it as `sha-<7>`, the same
+# short form PublishStage tags in ECR. check-run-name.py enforces both invariants.
+#
 #   manual   → Deploy → {env} · {sha_tag} · @{actor}   (sha_tag is already short)
 #   auto-CI  → Deploy {branch} → dev · after CI
 #   push     → Deploy {branch} → {env} · {commit message}

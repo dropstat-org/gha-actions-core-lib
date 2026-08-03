@@ -111,7 +111,33 @@ def main() -> int:
         )
         return 1
 
-    print("OK: run-name's workflow_dispatch title includes the source branch.")
+    # Second invariant: no raw 40-char sha in the title.
+    #
+    # GitHub expressions have no substring/slice, so anything interpolated here
+    # is shown at full length. `github.sha` (and `github.event.workflow_run.head_sha`)
+    # are 40 chars and were being used as the fallback when `sha_tag` is empty,
+    # which produced titles like
+    #   Deploy → qa · cd2dbc15cabaf3837eb532598acb2e6a6141d9f8 · from develop
+    # burying the two things the title exists to convey (target env, source branch).
+    #
+    # `sha_tag` itself is fine: the pipeline dispatches it as `sha-<7>`. The exact
+    # commit is already a click away in the run's commit link, and the resolved
+    # image is in the deploy job summary — so the fallback should be a literal.
+    long_sha = re.search(r"github\.sha|head_sha", block)
+    if long_sha:
+        print(f"FAIL: run-name interpolates `{long_sha.group(0)}` — a full 40-char sha.")
+        print(
+            "  Why it matters: run-name cannot truncate (no substring function in "
+            "GitHub expressions), so the whole sha lands in the run title and pushes "
+            "the target env and source branch out of view.\n"
+            "  Fix: use a literal fallback, e.g. "
+            "`github.event.inputs.sha_tag || 'commit'`. See "
+            "docs/templates/run-name-cd.yml for the canonical pattern."
+        )
+        return 1
+
+    print("OK: run-name's workflow_dispatch title includes the source branch "
+          "and carries no full-length sha.")
     return 0
 
 
