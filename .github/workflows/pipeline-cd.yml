@@ -216,6 +216,15 @@ jobs:
   # Aprobadores: variable CD_APPROVERS (org/repo).
   approval:
     name: Approval
+    # Un run viejo aprobado tarde se aplica DESPUES de uno nuevo y pisa qa con un
+    # build anterior -- paso el 2026-08-03: el CD de las 13:30 se aprobo 13:56, ya
+    # desplegado el de las 13:48. La compuerta no creo el problema pero abrio la
+    # ventana de segundos a media hora. Al entrar un run nuevo al grupo, el viejo
+    # que sigue esperando aprobacion se cancela; los jobs de deploy piden
+    # result == success || skipped, asi que un cancelled no despliega nada.
+    concurrency:
+      group: cd-approval-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
+      cancel-in-progress: true
     needs: [config, plan, pre_deploy]
     if: |
       always() &&
@@ -330,6 +339,15 @@ jobs:
   # certifica.
   approval_app:
     name: Approval (app qa/uat/prod)
+    # Un run viejo aprobado tarde se aplica DESPUES de uno nuevo y pisa qa con un
+    # build anterior -- paso el 2026-08-03: el CD de las 13:30 se aprobo 13:56, ya
+    # desplegado el de las 13:48. La compuerta no creo el problema pero abrio la
+    # ventana de segundos a media hora. Al entrar un run nuevo al grupo, el viejo
+    # que sigue esperando aprobacion se cancela; los jobs de deploy piden
+    # result == success || skipped, asi que un cancelled no despliega nada.
+    concurrency:
+      group: cd-approval-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
+      cancel-in-progress: true
     needs: [config]
     if: |
       needs.config.outputs.ActionsCoreLib_type != 'terraform' &&
@@ -430,6 +448,9 @@ jobs:
 
   deploy:
     name: Deploy
+    # Sin cancel: dos applies al mismo ambiente se serializan, no se descartan.
+    concurrency:
+      group: cd-deploy-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
     needs: [config, plan, pre_deploy, approval]
     environment: ${{ needs.config.outputs.deploy_environment }}
     timeout-minutes: 60
@@ -484,6 +505,9 @@ jobs:
 
   ecs_deploy:
     name: ECS Deploy
+    # Sin cancel: dos applies al mismo ambiente se serializan, no se descartan.
+    concurrency:
+      group: cd-deploy-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
     needs: [config, approval_app]
     if: |
       always() &&
@@ -547,6 +571,9 @@ jobs:
   # deploy.yaml. GITHUB_TOKEN is needed for the gh run download of the CI artifact.
   s3_deploy:
     name: S3 Deploy
+    # Sin cancel: dos applies al mismo ambiente se serializan, no se descartan.
+    concurrency:
+      group: cd-deploy-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
     needs: [config, approval_app]
     if: |
       always() &&
