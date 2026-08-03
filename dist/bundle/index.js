@@ -3042,15 +3042,6 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         core.info(`   ECR image verified: ${repoName}:${tag} exists`);
     }
     /**
-     * Whether this deploy is the cut of a release branch: the CI left SHA_TAG empty
-     * because the commit was inherited from develop, not authored here.
-     *
-     * An empty SHA_TAG on a release/** branch can only mean the cut - every later push
-     * there is an authored fix, which builds and names its own sha (see
-     * buildsItsOwnImage). That is why this needs no new workflow input: the absence of
-     * the tag is already the signal, so no repo has to be touched again.
-     */
-    /**
      * ECR repository name derived from metadata when action.yaml does not set `image`.
      * projectId=gha + serviceId=demo-api-ecs -> gha-demo-api-ecs, prefixed with
      * ECR_IMAGE_ORG when set (dropstat/gha-demo-api-ecs).
@@ -3063,7 +3054,27 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const orgPrefix = process.env.ECR_IMAGE_ORG?.trim() ?? '';
         return orgPrefix ? `${orgPrefix}/${name}` : name;
     }
+    /**
+     * Whether this deploy is the cut of a release branch: the CI left SHA_TAG empty
+     * because the commit was inherited from develop, not authored here.
+     *
+     * Under the dispatch-only CD an empty SHA_TAG on a release/** branch can only mean
+     * the cut - every later push there is an authored fix, which builds and names its
+     * own sha (see buildsItsOwnImage). That is why this needs no new workflow input:
+     * the absence of the tag is already the signal, so no repo has to be touched.
+     *
+     * The workflow_dispatch check is what keeps that inference honest during the
+     * migration. A repo still on the old push-driven CD triggers on `push: release/**`
+     * and also sends no sha_tag - but there the CI never built that commit, so an
+     * empty tag means "nothing was built", not "promote what qa has". Reading the
+     * alias there would turn a loud ImageNotFound into a silent deploy of qa's code
+     * onto a release branch, which is worse than the failure. The CD event name is
+     * the one signal that separates the two models with no per-repo change: the new
+     * CD is dispatch-only, the old one is push-driven.
+     */
     isReleaseCut() {
+        if (Env_1.Env.eventName() !== 'workflow_dispatch')
+            return false;
         const branch = (process.env.DEPLOY_REF || Env_1.Env.refName()).replace(/^refs\/heads\//, '');
         return branch.startsWith('release/');
     }
