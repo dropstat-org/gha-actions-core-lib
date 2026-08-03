@@ -8419,6 +8419,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SecurityConfigLoader = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const fs = __importStar(__nccwpck_require__(79896));
+const Credentials_1 = __nccwpck_require__(18753);
 /**
  * Loads per-repo security exception configs from dedicated dso-* repos.
  *
@@ -8556,7 +8557,12 @@ class SecurityConfigLoader {
         const repoId = `${projectId}-${serviceId}`;
         const branch = `release/${repoId}`;
         const url = `https://api.github.com/repos/${org}/${dsoRepo}/contents/${filename}?ref=${branch}`;
-        const token = process.env.GITHUB_TOKEN ?? '';
+        // GH_TOKEN first: most pipeline jobs export that name, and reading only
+        // GITHUB_TOKEN made these requests silently anonymous. Anonymous means the
+        // 60-req/hour shared-IP limit on GitHub-hosted runners, so the exceptions
+        // loaded or not depending on what else had run on that runner — a 403 here
+        // fails closed and breaks a build that a loaded .trivyignore would have passed.
+        const token = Credentials_1.Credentials.ghToken();
         const headers = {
             'Accept': 'application/vnd.github.v3.raw',
             'User-Agent': 'gha-actions-core-lib/security-config-loader',
@@ -8571,8 +8577,12 @@ class SecurityConfigLoader {
                 return null;
             }
             if (!res.ok) {
+                const hint = res.status === 403 && !token
+                    ? ' (no GH_TOKEN/GITHUB_TOKEN in this job — the request went out anonymous and hit ' +
+                        'the 60/hour shared-IP rate limit; export the token in the job)'
+                    : '';
                 core.warning(`[SecurityConfigLoader] Could not fetch ${dsoRepo}/${branch}/${filename}: ` +
-                    `HTTP ${res.status} — running with defaults`);
+                    `HTTP ${res.status}${hint} — running with defaults`);
                 return null;
             }
             const content = await res.text();
