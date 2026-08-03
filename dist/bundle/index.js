@@ -6711,30 +6711,28 @@ exports.BUILD_TAG_PREFIX = 'built/sha-';
  * count also silently changes with squash/rebase/octopus merges. So the source
  * of truth is an explicit marker instead of git graph shape: PublishStage tags
  * the built commit with `built/sha-<shortsha>` at build time (see PublishStage.ts),
- * and any later ref resolves it via `git describe`, which walks first-parent
- * ancestry to the nearest such tag regardless of how many merges sit in between.
+ * and any later ref resolves it by following the merged-in side of each merge
+ * until it reaches a commit carrying that tag, however many merges sit in between.
  *
  * On a MERGE commit the search starts at the second parent — the side the merge
- * brought in — not at the merge itself. `git describe` picks the nearest tag by
- * depth over all reachable history, with no notion of which branch a tag arrived
- * on, so from a merge commit it can just as easily return something merged in
- * earlier from an unrelated line of work. That is not hypothetical: after a
- * hotfix had been merged into main, a later `develop -> main` merge resolved to
- * the HOTFIX image (sha-73fabe3) instead of the image qa had just validated
- * (sha-512f6f0), because the hotfix tag sat fewer commits away. The promotion
- * gate blocked the deploy for lacking ':uat', which is the only reason it did not
- * ship. What a promotion merge deploys is what it merged in, so that is where the
- * walk begins.
+ * brought in — not at the merge itself, because what a promotion merge deploys is
+ * what it merged in. Describing from the merge itself let a hotfix already sitting
+ * in main win on depth over the image qa had just validated (sha-73fabe3 instead
+ * of sha-512f6f0); the promotion gate blocking it for lacking ':uat' is the only
+ * reason it did not ship.
+ *
+ * The lookup is EXACT-match, never nearest — see resolveBuiltCommit for why, and
+ * for the incident that made the difference matter.
  *
  * Priority:
  *   1. IMAGE_SHA env var — workflow passes ${{ github.event.pull_request.head.sha }}
  *      explicitly for pull_request events where GITHUB_SHA is wrong.
- *   2. Nearest `built/sha-*` tag reachable from the merged-in side (or from
- *      GITHUB_SHA itself when it is not a merge) — resolves through any number
- *      of chained promotion merges (requires a non-shallow checkout).
- *   3. Second parent of a merge commit — legacy fallback for images built
- *      before this tag was introduced, or a shallow checkout without tag history.
- *   4. GITHUB_SHA — correct for feature/* and hotfix/* pushes (direct commits).
+ *   2. The `built/sha-*` tag on the merged-in commit (or on GITHUB_SHA itself when
+ *      it is not a merge), following the merged-in side through any number of
+ *      chained promotion merges. Requires a non-shallow checkout WITH tags.
+ *   3. Nothing. If no build tag is found this throws, because every remaining
+ *      option is a guess, and a wrong guess deploys the wrong code while
+ *      reporting success. Manual dispatch with sha_tag is the escape hatch.
  */
 function resolveImageSHA() {
     if (process.env.IMAGE_SHA)
@@ -6742,23 +6740,58 @@ function resolveImageSHA() {
     const sha = process.env.GITHUB_SHA ?? '';
     if (!sha)
         return '';
-    const secondParent = getSecondParent(sha);
-    const tagged = getNearestBuildTagSHA(secondParent ?? sha);
+    const start = getSecondParent(sha) ?? sha;
+    const tagged = resolveBuiltCommit(start);
     if (tagged)
         return tagged;
-    return secondParent ?? sha;
+    throw new Error(`No build tag (${exports.BUILD_TAG_PREFIX}*) found for ${start}.\n` +
+        'The commit being deployed was never built, so there is no image to deploy. ' +
+        'The usual cause is a commit pushed to the branch after its CI run - the merge ' +
+        'then brings in a commit no pipeline ever published.\n' +
+        'Fix: re-run CI on the branch head and merge again, or dispatch the deploy manually ' +
+        'with sha_tag set to the image you want.');
 }
 /**
- * Finds the nearest ancestor (first-parent reachable) commit carrying a
- * `built/sha-*` tag and returns its full commit SHA. Returns null if no such
- * tag is reachable (shallow checkout, or a commit built before this fix shipped).
+ * Walks the merged-in side looking for the commit that was actually built.
+ *
+ * The rule is exact-match, not nearest: the commit must itself carry a
+ * `built/sha-*` tag. A plain `git describe` returns the nearest tag by depth over
+ * ALL reachable history, which means an untagged commit silently resolves to
+ * whatever tagged ancestor happens to sit closest - including one from a
+ * different line of work. That is not hypothetical either: on 2026-08-03 a
+ * develop merge whose second parent was an untagged commit pushed after CI
+ * resolved to `sha-462157f`, the pre-merge develop tip, and qa spent three days
+ * redeploying an image 20 commits behind while every run reported success.
+ *
+ * Chained promotions still resolve: when the merged-in side is itself a merge
+ * (develop -> main, where develop's tip is a merge of a feature), the walk
+ * recurses into ITS merged-in side, as many hops as the GitFlow needs.
+ *
+ * When the walk reaches a non-merge commit carrying no tag, that commit was
+ * genuinely never built, and the caller fails rather than deploying something
+ * plausible. Manual dispatch with an explicit sha_tag remains the escape hatch.
  */
-function getNearestBuildTagSHA(sha) {
+function resolveBuiltCommit(sha, depth = 0) {
+    if (depth > MAX_PROMOTION_HOPS)
+        return null;
+    const exact = getExactBuildTagSHA(sha);
+    if (exact)
+        return exact;
+    const secondParent = getSecondParent(sha);
+    if (!secondParent)
+        return null;
+    return resolveBuiltCommit(secondParent, depth + 1);
+}
+/** Guards against a pathological history turning the walk into a long git loop. */
+const MAX_PROMOTION_HOPS = 20;
+/**
+ * Returns the commit SHA if this exact commit carries a `built/sha-*` tag.
+ * Unlike the previous nearest-tag lookup this never reaches past the commit
+ * itself, so it cannot substitute an unrelated ancestor's image.
+ */
+function getExactBuildTagSHA(sha) {
     try {
-        const tag = (0, child_process_1.execSync)(`git describe --tags --match "${exports.BUILD_TAG_PREFIX}*" --abbrev=0 ${sha}`, {
-            encoding: 'utf8',
-            stdio: ['pipe', 'pipe', 'ignore'],
-        }).trim();
+        const tag = (0, child_process_1.execSync)(`git describe --tags --exact-match --match "${exports.BUILD_TAG_PREFIX}*" ${sha}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
         if (!tag)
             return null;
         const taggedSHA = (0, child_process_1.execSync)(`git rev-list -n 1 ${tag}`, {
