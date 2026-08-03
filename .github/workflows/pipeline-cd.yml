@@ -358,7 +358,7 @@ jobs:
         uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
         with:
           secret: ${{ steps.app-token.outputs.token || github.token }}
-          approvers: no-such-user-xyz-tmp
+          approvers: ${{ vars.CD_APPROVERS }}
           minimum-approvals: 1
           issue-title: "Aprobar deploy app (${{ needs.config.outputs.deploy_environment }}): ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
           issue-body: "Deploy ECS/S3 a ${{ needs.config.outputs.deploy_environment }}. Comenta approved para desplegar o denied para cancelar."
