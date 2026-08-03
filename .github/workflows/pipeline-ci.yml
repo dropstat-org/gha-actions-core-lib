@@ -93,6 +93,16 @@ jobs:
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: compile
+      # A JVM repo has nothing here to mark; a non-JVM one has nothing at all, and
+      # `if-no-files-found: ignore` then uploads NO artifact. The consumers
+      # (sonarqube, publish) are `continue-on-error`, so that was never fatal - but
+      # download-artifact still printed a red "Artifact not found for name:
+      # compile-output" in every frontend run, which reads like a broken pipeline
+      # and sent us looking at Sonar twice. This marker makes the artifact always
+      # exist, so the download is a real no-op instead of a swallowed error.
+      - name: Marker so compile-output always exists
+        if: always()
+        run: echo "non-JVM repos upload only this" > .compile-output
       # Share compiled classes so the SonarQube job (separate workspace) can run
       # the Java/JVM sensor (needs sonar.java.binaries), and share the built jar
       # so the Publish job's Docker build doesn't have to recompile from scratch.
@@ -102,6 +112,7 @@ jobs:
         with:
           name: compile-output
           path: |
+            .compile-output
             target/classes
             build/classes
             target/*.jar
