@@ -1838,10 +1838,25 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
     }
     async install() {
         const { sonarqube_scanner: version } = await PlatformConfigLoader_1.PlatformConfigLoader.toolVersions();
+        // Skip the download when the right version is already there. Same guard TrivyStage
+        // has: on a self-hosted runner /opt survives between jobs, so the install ran on
+        // top of itself every time.
+        const existing = await exec.getExecOutput('sonar-scanner', ['--version'], { ignoreReturnCode: true, silent: true });
+        if (existing.exitCode === 0 && (existing.stdout + existing.stderr).includes(version)) {
+            Logger_1.Logger.info(`sonar-scanner ${version} already installed - skipping download`);
+            return;
+        }
         Logger_1.Logger.info(`Installing sonar-scanner ${version}...`);
         const url = `https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${version}-linux-x64.zip`;
         await exec.exec('curl', ['-sSLo', '/tmp/sonar.zip', url]);
+        await exec.exec('rm', ['-rf', `/tmp/sonar-scanner-${version}-linux-x64`]);
         await exec.exec('unzip', ['-q', '/tmp/sonar.zip', '-d', '/tmp']);
+        // `mv` onto an existing directory does not replace it - it moves the source
+        // INSIDE it, and across filesystems (/tmp -> /opt is its own mount on the
+        // runner) that degrades to copy+rmdir and dies with
+        // "unable to remove target: Directory not empty". Clear the target first so a
+        // version bump, or a half-finished earlier install, cannot wedge the stage.
+        await exec.exec('sudo', ['rm', '-rf', '/opt/sonar-scanner']);
         await exec.exec('sudo', ['mv', `/tmp/sonar-scanner-${version}-linux-x64`, '/opt/sonar-scanner']);
         await exec.exec('sudo', ['ln', '-sf', '/opt/sonar-scanner/bin/sonar-scanner', '/usr/local/bin/sonar-scanner']);
     }
