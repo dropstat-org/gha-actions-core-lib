@@ -2791,17 +2791,28 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // behind), so an unresolvable sha is a hard error instead of a fallback.
         // Same "$VAR" literal guard as task_definition: an unset env var resolves to
         // its own literal ("$SHA_TAG"), which must count as "not configured".
+        const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
         const rawTag = cfg.image_tag ? resolve(cfg.image_tag) : '';
         const resolvedTag = (rawTag && !rawTag.startsWith('$')) ? (0, ImageSHA_1.normalizeShaTag)(rawTag) : '';
+        // Cutting release/x from develop is the one promotion git cannot resolve. The
+        // branch tip IS develop's tip, and with a squash merge the commit that built the
+        // image is unreachable from it - `git describe` finds no built/ tag and falls back
+        // to a sha with no image. What the cut means is "stabilise what qa has", so the
+        // source of truth is the ':qa' alias itself, pinned here to its immutable sha tag
+        // so a later merge to develop cannot move what this deploy shipped. This is the
+        // only place an alias is read as a deploy source, and it is read as a POINTER -
+        // the deploy still targets the sha it resolves to.
+        const cutTag = (!resolvedTag && this.isReleaseCut())
+            ? await this.resolveAliasToShaTag('qa', region)
+            : '';
         const shaOfCommit = this.config.metadata.commitHash ?? (0, ImageSHA_1.resolveImageSHA)();
-        const imageTag = resolvedTag || (shaOfCommit ? `sha-${(0, ImageSHA_1.shortSHA)(shaOfCommit)}` : '');
+        const imageTag = resolvedTag || cutTag || (shaOfCommit ? `sha-${(0, ImageSHA_1.shortSHA)(shaOfCommit)}` : '');
         if (!imageTag) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.ECR_IMAGE_NOT_FOUND, 'Cannot resolve the image sha to deploy: SHA_TAG is empty and no commit sha is ' +
                 'available (IMAGE_SHA/GITHUB_SHA unset). Deploys must target an immutable sha-<hash> ' +
                 'tag - environment aliases are audit markers, not deploy sources.');
         }
         const waitStable = cfg.wait_for_stability !== false;
-        const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-2';
         // ── ECS deploy role ───────────────────────────────────────────────────────
         // Priority: deploy.yaml[env].deploy_role > ECS_DEPLOY_ROLE env var (legacy).
         // Using deploy.yaml is strongly preferred: the role is keyed by the lib-derived
@@ -2840,19 +2851,8 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const ecrRegistry = process.env.ECR_REGISTRY?.trim() ?? '';
         const accountId = process.env.AWS_ACCOUNT_ID?.trim() ?? '';
         const ecr = ecrRegistry || (accountId ? `${accountId}.dkr.ecr.${region}.amazonaws.com` : '');
-        // Auto-derive image from metadata when not set in action.yaml.
-        // projectId=gha + serviceId=demo-api-ecs → gha-demo-api-ecs
-        // With ECR_IMAGE_ORG=dropstat → dropstat/gha-demo-api-ecs
         const { projectId, serviceId } = this.config.metadata;
-        const derivedImage = (() => {
-            if (projectId && serviceId) {
-                const name = `${projectId}-${serviceId}`;
-                const orgPrefix = process.env.ECR_IMAGE_ORG?.trim() ?? '';
-                return orgPrefix ? `${orgPrefix}/${name}` : name;
-            }
-            return '';
-        })();
-        const imageBase = cfg.image ?? derivedImage;
+        const imageBase = cfg.image ?? this.ecrRepoName();
         const fullImage = imageBase
             ? (ecr ? `${ecr}/${imageBase}:${imageTag}` : `${imageBase}:${imageTag}`)
             : null;
@@ -3040,6 +3040,77 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 `Ensure the AppRelease stage completed successfully before ECSDeployStage runs.`);
         }
         core.info(`   ECR image verified: ${repoName}:${tag} exists`);
+    }
+    /**
+     * Whether this deploy is the cut of a release branch: the CI left SHA_TAG empty
+     * because the commit was inherited from develop, not authored here.
+     *
+     * An empty SHA_TAG on a release/** branch can only mean the cut - every later push
+     * there is an authored fix, which builds and names its own sha (see
+     * buildsItsOwnImage). That is why this needs no new workflow input: the absence of
+     * the tag is already the signal, so no repo has to be touched again.
+     */
+    /**
+     * ECR repository name derived from metadata when action.yaml does not set `image`.
+     * projectId=gha + serviceId=demo-api-ecs -> gha-demo-api-ecs, prefixed with
+     * ECR_IMAGE_ORG when set (dropstat/gha-demo-api-ecs).
+     */
+    ecrRepoName() {
+        const { projectId, serviceId } = this.config.metadata;
+        if (!projectId || !serviceId)
+            return '';
+        const name = `${projectId}-${serviceId}`;
+        const orgPrefix = process.env.ECR_IMAGE_ORG?.trim() ?? '';
+        return orgPrefix ? `${orgPrefix}/${name}` : name;
+    }
+    isReleaseCut() {
+        const branch = (process.env.DEPLOY_REF || Env_1.Env.refName()).replace(/^refs\/heads\//, '');
+        return branch.startsWith('release/');
+    }
+    /**
+     * Resolves a floating alias (':qa') to the immutable `sha-*` tag on the same image.
+     *
+     * Returns '' when the alias does not exist or carries no sha tag, leaving the
+     * caller's normal resolution to run and fail with its own message - a release cut
+     * in a repo that has never deployed to qa has nothing to promote, and saying that
+     * plainly beats deploying something arbitrary.
+     */
+    async resolveAliasToShaTag(alias, region) {
+        const repoName = this.ecrRepoName();
+        if (!repoName)
+            return '';
+        const registryHost = process.env.ECR_REGISTRY?.trim() ?? '';
+        const registryId = registryHost ? registryHost.split('.')[0] : (process.env.AWS_ACCOUNT_ID?.trim() ?? '');
+        const args = [
+            'ecr', 'describe-images',
+            '--region', region,
+            '--repository-name', repoName,
+            '--image-ids', `imageTag=${alias}`,
+            '--query', 'imageDetails[0].imageTags',
+            '--output', 'json',
+        ];
+        if (registryId)
+            args.push('--registry-id', registryId);
+        let out = '';
+        const code = await exec.exec('aws', args, {
+            ignoreReturnCode: true,
+            silent: true,
+            listeners: { stdout: (d) => { out += d.toString(); } },
+        });
+        if (code !== 0)
+            return '';
+        let tags = [];
+        try {
+            tags = JSON.parse(out.trim() || '[]');
+        }
+        catch {
+            return '';
+        }
+        const shaTag = tags.find(t => /^sha-[0-9a-f]{7,}$/.test(t)) ?? '';
+        if (!shaTag)
+            return '';
+        core.info(`   Release cut: ':${alias}' resolves to ${repoName}:${shaTag} - promoting the image qa validated, not rebuilding`);
+        return shaTag;
     }
     /**
      * Promotion gate: confirms the sha-tagged image already carries one of
@@ -3738,9 +3809,17 @@ function environmentFor(ref) {
  * push-driven CD arrived with an empty sha_tag and resolved the image itself
  * (resolveImageSHA -> the merge's second parent, or the built/ tag). Naming the sha
  * from CI overrode that resolution with a commit that has no image.
+ *
+ * `isCreation` covers the one case where a release/** push does NOT build: cutting
+ * the branch. That commit is develop's tip, inherited rather than authored, and what
+ * it means is "stabilise what qa has" - so it promotes the image qa validated instead
+ * of compiling the same source into a second, different binary. Every later push to
+ * the release branch is an authored fix and builds normally.
  */
-function buildsItsOwnImage(ref) {
+function buildsItsOwnImage(ref, isCreation = false) {
     const branch = ref.replace(/^refs\/heads\//, '');
+    if (isCreation && branch.startsWith('release/'))
+        return false;
     return branch.startsWith('feature/')
         || branch.startsWith('hotfix/')
         || branch.startsWith('release/');
@@ -3785,7 +3864,7 @@ class TriggerCdStage {
         // commit has no image of its own, so the tag is left empty and the CD resolves the
         // image it is promoting - the same path a push-driven CD always took. Sending
         // `sha-<merge commit>` there just makes the deploy fail with ECR_IMAGE_NOT_FOUND.
-        const buildsOwn = buildsItsOwnImage(ref);
+        const buildsOwn = buildsItsOwnImage(ref, Env_1.Env.isBranchCreation());
         const inputs = {
             sha_tag: buildsOwn ? `sha-${Env_1.Env.sha()}` : '',
             environment,
@@ -6125,12 +6204,13 @@ exports.DockerArtifactManager = DockerArtifactManager;
 /***/ }),
 
 /***/ 45188:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Env = void 0;
+const fs_1 = __nccwpck_require__(79896);
 /**
  * Typed access to environment variables, with named accessors
  * for all standard GitHub Actions context variables.
@@ -6183,6 +6263,33 @@ class Env {
     /** URL to this run's summary page. */
     static runUrl() {
         return `${this.serverUrl()}/${this.repository()}/actions/runs/${this.runId()}`;
+    }
+    /**
+     * Whether this push event created the branch, rather than adding commits to one
+     * that already existed.
+     *
+     * There is no environment variable for this - it lives only in the event payload
+     * (`created: true`, with `before` all zeroes). Reading the payload file is the
+     * only way to tell a branch cut apart from a normal push, and the difference
+     * matters: the commit at a cut is inherited from the branch it was cut from, so
+     * it was already built there and must not be built again.
+     *
+     * Returns false for any non-push event, and for an unreadable or malformed
+     * payload - the safe direction, since the fallback is the existing behaviour.
+     */
+    static isBranchCreation() {
+        if (this.eventName() !== 'push')
+            return false;
+        const path = this.get('GITHUB_EVENT_PATH');
+        if (!path)
+            return false;
+        try {
+            const payload = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
+            return payload.created === true;
+        }
+        catch {
+            return false;
+        }
     }
 }
 exports.Env = Env;
@@ -6691,6 +6798,7 @@ const StageName_1 = __nccwpck_require__(90969);
 const BranchType_1 = __nccwpck_require__(22302);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
+const Env_1 = __nccwpck_require__(45188);
 const STAGE_FLAGS = [
     { output: 'compile_enabled', stageName: StageName_1.StageName.COMPILE },
     { output: 'unit_test_enabled', stageName: StageName_1.StageName.UNIT_TEST },
@@ -6771,6 +6879,19 @@ class OutputWriter {
                 // develop/release/master slots = PROMOTE_STAGES → release + ecs/s3_deploy enabled.
                 allowedSlots = new Set([...allowedSlots].filter(s => CD_ALLOW.has(s)));
             }
+        }
+        // ── Release cut: promote, do not rebuild ───────────────────────────────────
+        // Cutting release/x from develop carries develop's tip over unchanged. Building
+        // it again turns the exact source qa validated into a second, different binary,
+        // and the CD then has to choose between two images of the same code. So the cut
+        // drops the build half and only routes - the same shape develop and main already
+        // have. Authored commits pushed to the release branch afterwards are not
+        // creations, so they keep compiling normally (see buildsItsOwnImage).
+        if (phase === 'ci' && branchType === BranchType_1.BranchType.RELEASE && Env_1.Env.isBranchCreation()) {
+            for (const stage of [StageName_1.StageName.COMPILE, StageName_1.StageName.PUBLISH, StageName_1.StageName.TRIVY]) {
+                allowedSlots.delete(stage);
+            }
+            core.info('Release branch cut - promoting the image qa validated instead of rebuilding it.');
         }
         if (phase)
             core.info(`Pipeline phase: ${phase} → stages: ${[...allowedSlots].join(', ') || '(none)'}`);
