@@ -65,7 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
       - id: cfg
-        uses: dropstat-org/gha-actions-core-lib@main
+        uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: config
         env:
@@ -90,7 +90,7 @@ jobs:
           java:    ${{ needs.config.outputs.tools_java }}
           maven:   ${{ needs.config.outputs.tools_maven }}
           flutter: ${{ needs.config.outputs.tools_flutter }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: compile
       # A JVM repo has nothing here to mark; a non-JVM one has nothing at all, and
@@ -138,7 +138,7 @@ jobs:
           java:    ${{ needs.config.outputs.tools_java }}
           maven:   ${{ needs.config.outputs.tools_maven }}
           flutter: ${{ needs.config.outputs.tools_flutter }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: unit_test
         env:
@@ -164,7 +164,7 @@ jobs:
           java:    ${{ needs.config.outputs.tools_java }}
           maven:   ${{ needs.config.outputs.tools_maven }}
           flutter: ${{ needs.config.outputs.tools_flutter }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: linter
         env:
@@ -188,7 +188,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: semgrep
         env:
@@ -211,7 +211,7 @@ jobs:
         continue-on-error: true
         with:
           name: compile-output
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: sonarqube
         env:
@@ -234,7 +234,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: trivy
         env:
@@ -252,7 +252,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: checkov
         env:
@@ -302,7 +302,7 @@ jobs:
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: publish
         env:
@@ -320,7 +320,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: generic
 
@@ -343,7 +343,7 @@ jobs:
           session-name: GitHubActions-ci-plan
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: plan
         env:
@@ -366,7 +366,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         with:
           stage: checkov_tf
 
@@ -434,7 +434,7 @@ jobs:
       # `ecs_deploy` promotes an image by tag and its CD declares no such input, so
       # sending it got the whole dispatch rejected with 422. The stage reads
       # action.yaml and decides - the YAML has no business knowing.
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/cd-dispatch-ref-fallback
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # On develop compile is skipped (build-once promotes, it does not rebuild),
