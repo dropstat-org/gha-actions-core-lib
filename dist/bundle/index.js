@@ -912,6 +912,7 @@ const StageValidator_1 = __nccwpck_require__(81466);
 const WorkflowFactory_1 = __nccwpck_require__(20265);
 const StageRegistry_1 = __nccwpck_require__(38600);
 const OutputWriter_1 = __nccwpck_require__(73021);
+const QualityStageInjector_1 = __nccwpck_require__(70934);
 const BranchDetector_1 = __nccwpck_require__(90609);
 const StageName_1 = __nccwpck_require__(90969);
 const ValidateApproverStage_1 = __nccwpck_require__(18487);
@@ -928,6 +929,12 @@ async function run() {
         MetadataValidator_1.MetadataValidator.validate(config.metadata);
         StageValidator_1.StageValidator.validate(config.stages);
         const workflow = WorkflowFactory_1.WorkflowFactory.create(config.type);
+        // Platform-injected lint / unit_test. Must happen before checkStages (the
+        // injected stage has to satisfy the slot order) and before the stage lookup
+        // below, which is the whole reason it lives on this shared path rather than
+        // in OutputWriter: the config job and the stage job parse action.yaml
+        // separately, and both have to see the same stage list.
+        await QualityStageInjector_1.QualityStageInjector.inject(config, branchType, workflow);
         workflow.checkStages(config.stages, branchType);
         if (stageName === StageName_1.StageName.CONFIG) {
             await OutputWriter_1.OutputWriter.writeFlags(config, branchType, workflow);
@@ -1132,7 +1139,7 @@ class LintStage extends AbstractStage_1.AbstractStage {
         }
         const end = this.startGroup(`linter: ${stage.name}`);
         try {
-            await this.execCommands(stage.commands, this._effectiveTools(stage));
+            await this.execQualityCommands(stage);
         }
         finally {
             end();
@@ -1195,7 +1202,7 @@ class UnitTestStage extends AbstractStage_1.AbstractStage {
         }
         const end = this.startGroup(`unit_test: ${stage.name}`);
         try {
-            await this.execCommands(stage.commands, this._effectiveTools(stage));
+            await this.execQualityCommands(stage);
             if (stage.junitPath) {
                 core.info(`JUnit results expected at: ${stage.junitPath}`);
             }
@@ -2278,6 +2285,29 @@ class AbstractStage {
         for (const cmd of commands) {
             Logger_1.Logger.info(`$ ${cmd}`);
             await exec.exec('bash', ['-c', cmd], { env: env });
+        }
+    }
+    /**
+     * execCommands for the platform-injected quality stages. When the stage is
+     * soft-failing (the default — only dso-quality can make it fatal) a failure is
+     * downgraded to a warning so the job stays green.
+     *
+     * Green matters concretely: the publish and trigger_cd gates key off
+     * `needs.linter.result != 'failure'`, so swallowing the error here is what keeps
+     * an injected stage from silently becoming a deploy blocker for every repo in
+     * the org. Escalating is then a one-line edit in dso-quality, with no change to
+     * the workflow conditions.
+     */
+    async execQualityCommands(stage) {
+        const commands = stage.commands ?? [];
+        try {
+            await this.execCommands(commands, this._effectiveTools(stage));
+        }
+        catch (err) {
+            if (!stage.quality?.softFail)
+                throw err;
+            Logger_1.Logger.warn(`${stage.name} failed but is configured as soft-fail in dso-quality ` +
+                `(source: ${stage.quality.source}) — reporting only: ${err.message}`);
         }
     }
     _buildEnv(tools) {
@@ -7775,6 +7805,276 @@ function logColoredSection(color, symbol, label, items) {
     }
 }
 //# sourceMappingURL=PlanSummary.js.map
+
+/***/ }),
+
+/***/ 16839:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.QualityConfigLoader = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const fs = __importStar(__nccwpck_require__(79896));
+const yaml = __importStar(__nccwpck_require__(74281));
+const SecurityConfigLoader_1 = __nccwpck_require__(76560);
+class QualityConfigLoader {
+    static async fetch(projectId, serviceId) {
+        const raw = await SecurityConfigLoader_1.SecurityConfigLoader.fetch('dso-quality', projectId, serviceId, 'quality.yaml');
+        if (raw === null)
+            return null;
+        return this.parse(raw);
+    }
+    static parse(content) {
+        try {
+            const data = yaml.load(content);
+            if (!data || typeof data !== 'object')
+                return null;
+            return data;
+        }
+        catch (err) {
+            core.warning(`[QualityConfigLoader] quality.yaml is not valid YAML: ${err.message} — falling back to auto-detection`);
+            return null;
+        }
+    }
+    // ── Auto-detection ──────────────────────────────────────────────────────────
+    // Used when dso-quality has nothing to say about this repo. Detection only ever
+    // produces a soft-failing stage, so the worst case of a wrong guess is a noisy
+    // warning, never a blocked pipeline.
+    /** Lint commands inferred from the repo layout, or null when nothing is lintable. */
+    static detectLintCommands() {
+        if (!this.exists('package.json'))
+            return null;
+        const install = this.npmInstall();
+        if (this.hasNpmScript('lint'))
+            return [install, 'npm run lint'];
+        const hasEslintConfig = ['eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs',
+            '.eslintrc', '.eslintrc.js', '.eslintrc.json', '.eslintrc.yml'].some(f => this.exists(f)) ||
+            this.packageJson()?.eslintConfig !== undefined;
+        return hasEslintConfig ? [install, 'npx eslint .'] : null;
+    }
+    /** Unit-test commands inferred from the repo layout, or null when there is no test runner. */
+    static detectTestCommands() {
+        if (this.exists('pom.xml'))
+            return ['mvn -B test'];
+        if (this.exists('build.gradle') || this.exists('build.gradle.kts'))
+            return ['./gradlew test'];
+        if (this.exists('package.json') && this.hasNpmScript('test')) {
+            // CI=true makes CRA/Jest run once and exit; without it `react-scripts test`
+            // sits in watch mode and the job burns its timeout instead of reporting.
+            return [this.npmInstall(), 'CI=true npm test -- --watchAll=false --passWithNoTests'];
+        }
+        return null;
+    }
+    // ── Helpers ─────────────────────────────────────────────────────────────────
+    static npmInstall() {
+        // The org's React repos have long-standing peer-dependency conflicts; a bare
+        // `npm ci` fails on them. The flag is a no-op where there is no conflict.
+        return 'npm ci --legacy-peer-deps';
+    }
+    static hasNpmScript(name) {
+        const scripts = this.packageJson()?.scripts;
+        return typeof scripts?.[name] === 'string';
+    }
+    static packageJson() {
+        try {
+            return JSON.parse(fs.readFileSync('package.json', 'utf8'));
+        }
+        catch {
+            return null;
+        }
+    }
+    static exists(path) {
+        try {
+            return fs.existsSync(path);
+        }
+        catch {
+            return false;
+        }
+    }
+}
+exports.QualityConfigLoader = QualityConfigLoader;
+//# sourceMappingURL=QualityConfigLoader.js.map
+
+/***/ }),
+
+/***/ 70934:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.QualityStageInjector = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const StageName_1 = __nccwpck_require__(90969);
+const QualityConfigLoader_1 = __nccwpck_require__(16839);
+/**
+ * Adds `unit_test` and `linter` to the parsed config when the repo has not declared
+ * them, so lint and tests run without every repo having to edit its action.yaml or
+ * its pipeline-ci.yml. Same idea as injectMandatoryStages (semgrep / sonarqube),
+ * with two differences that force it to live here instead of in ActionYaml:
+ *
+ *  - it needs the commands, which come either from dso-quality (async fetch) or
+ *    from sniffing the checked-out repo;
+ *  - it is branch-aware, so it does not add a stage to a branch whose slot list
+ *    has no place for it.
+ *
+ * It runs on the SHARED load path in index.ts, before the stage lookup — the config
+ * job and the stage job both parse action.yaml independently, so injecting only into
+ * the flags would leave the linter job enabled and then dying with
+ * "Stage 'linter' not found in action.yaml".
+ *
+ * A stage declared by the repo always wins: this only fills gaps, it never
+ * overrides. Whether a failure is fatal is decided in dso-quality, never here.
+ */
+class QualityStageInjector {
+    static async inject(config, branchType, workflow) {
+        // CD promotes an artifact that CI already checked; re-linting it there would
+        // only add minutes and a second chance to fail on the way to production.
+        if ((process.env.PIPELINE_PHASE ?? '').toLowerCase() === 'cd')
+            return;
+        const file = await QualityConfigLoader_1.QualityConfigLoader.fetch(config.metadata.projectId, config.metadata.serviceId);
+        await this.injectOne(config, branchType, workflow, {
+            stageName: StageName_1.StageName.UNIT_TEST,
+            entry: file?.unit_test,
+            detect: () => QualityConfigLoader_1.QualityConfigLoader.detectTestCommands(),
+            insertAfter: [StageName_1.StageName.COMPILE],
+            insertBefore: [StageName_1.StageName.LINTER, StageName_1.StageName.SEMGREP, StageName_1.StageName.SONARQUBE,
+                StageName_1.StageName.CHECKOV, StageName_1.StageName.TRIVY, StageName_1.StageName.PUBLISH],
+        });
+        await this.injectOne(config, branchType, workflow, {
+            stageName: StageName_1.StageName.LINTER,
+            entry: file?.lint,
+            detect: () => QualityConfigLoader_1.QualityConfigLoader.detectLintCommands(),
+            insertAfter: [StageName_1.StageName.UNIT_TEST, StageName_1.StageName.COMPILE],
+            insertBefore: [StageName_1.StageName.SEMGREP, StageName_1.StageName.SONARQUBE,
+                StageName_1.StageName.CHECKOV, StageName_1.StageName.TRIVY, StageName_1.StageName.PUBLISH],
+        });
+    }
+    static async injectOne(config, branchType, workflow, opts) {
+        const { stageName, entry, detect, insertAfter, insertBefore } = opts;
+        if (config.stages.some(s => s.name === stageName))
+            return; // repo declared it
+        if (entry?.enabled === false) {
+            core.info(`[quality] ${stageName} disabled for this repo in dso-quality`);
+            return;
+        }
+        // The slot list is authoritative. Adding a stage the branch has no slot for
+        // would be dead weight anyway (OutputWriter would leave its flag false), and
+        // GenericWorkflow — which imposes no restrictions — would actually run it.
+        const hasSlot = workflow.imposesNoRestrictions()
+            || workflow.stagesConfig(branchType).some(s => s.name === stageName);
+        if (!hasSlot)
+            return;
+        const commands = entry?.commands?.length ? entry.commands : detect();
+        if (!commands?.length) {
+            core.info(`[quality] no ${stageName} commands configured or detected — skipping`);
+            return;
+        }
+        // soft_fail is opt-OUT: it has to be explicitly set to false in dso-quality for
+        // this to be able to break a build. Auto-detected commands are a guess about
+        // someone else's repo and never get to be fatal, whatever the config says.
+        const fromConfig = !!entry?.commands?.length;
+        const softFail = fromConfig ? entry?.soft_fail !== false : true;
+        const stage = {
+            name: stageName,
+            commands,
+            quality: { softFail, source: fromConfig ? 'dso-quality' : 'auto-detected' },
+        };
+        config.stages.splice(this.insertIndex(config.stages, insertAfter, insertBefore), 0, stage);
+        core.info(`[quality] ${stageName} injected (${fromConfig ? 'dso-quality' : 'auto-detected'}, ` +
+            `${softFail ? 'soft-fail: reports only' : 'BLOCKING: a failure stops publish'})`);
+    }
+    /**
+     * Keeps the injected stage in canonical slot order. Order is not cosmetic here:
+     * Workflow.checkOrder throws INVALID_STAGE_ORDER if the declared stages do not
+     * follow the slot sequence, so appending unit_test after `publish` would fail
+     * every repo that already declares publish.
+     */
+    static insertIndex(stages, after, before) {
+        for (const name of after) {
+            const idx = stages.findIndex(s => s.name === name);
+            if (idx >= 0)
+                return idx + 1;
+        }
+        let insertAt = stages.length;
+        for (const name of before) {
+            const idx = stages.findIndex(s => s.name === name);
+            if (idx >= 0 && idx < insertAt)
+                insertAt = idx;
+        }
+        return insertAt;
+    }
+}
+exports.QualityStageInjector = QualityStageInjector;
+//# sourceMappingURL=QualityStageInjector.js.map
 
 /***/ }),
 
