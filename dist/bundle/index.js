@@ -4088,7 +4088,13 @@ class TriggerCdStage {
                 `Deploy manually with an explicit run_id.`);
         }
         core.info(`Commit ${sha} came from PR head ${buildSha}.`);
-        const runs = await this.get(`/repos/${Env_1.Env.repository()}/actions/runs?head_sha=${buildSha}&status=success&per_page=50`);
+        // Deliberately NOT filtered by `status=success`. What makes a run a usable
+        // handoff is that it still holds the artifact, not the colour of its badge -
+        // and the two come apart: a feature CI whose only failing job is this very
+        // stage (a deleted branch makes the dispatch 422) is marked `failure` while
+        // its 35MB dist sits there perfectly good. On 2026-08-03 that filter told
+        // desktop-app's develop promotion "no build exists" about a live artifact.
+        const runs = await this.get(`/repos/${Env_1.Env.repository()}/actions/runs?head_sha=${buildSha}&per_page=50`);
         // Match the workflow FILE, never the run's display name: callers set `run-name`, so
         // a CI run reads "CI feature/x - sha-abc - @someone". Filtering on the name matched
         // nothing and reported "no build exists" for builds sitting there with a live artifact.
@@ -4105,36 +4111,69 @@ class TriggerCdStage {
             }
             core.info(`CI run ${run.id} has no live artifacts - trying the next one.`);
         }
-        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Cannot resolve which build to deploy: no successful 'pipeline-ci.yml' run with live ` +
-            `artifacts exists for ${buildSha} (the commit merged into ${Env_1.Env.refName()}). Its CI never ` +
-            `ran, failed, or its artifacts expired. Re-run CI on that commit, or deploy manually with ` +
-            `an explicit run_id.`);
+        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Cannot resolve which build to deploy: no 'pipeline-ci.yml' run holding a live artifact ` +
+            `exists for ${buildSha} (the commit merged into ${Env_1.Env.refName()}). Its CI never ran, never ` +
+            `reached the build stage, or its artifacts expired. Re-run CI on that commit, or deploy ` +
+            `manually with an explicit run_id.`);
     }
     static async dispatch(inputs, kind) {
-        const res = await fetch(`${this.api}/repos/${Env_1.Env.repository()}/actions/workflows/pipeline-cd.yml/dispatches`, {
-            method: 'POST',
-            headers: this.headers(),
-            body: JSON.stringify({ ref: Env_1.Env.refName(), inputs }),
-        });
+        let res = await this.postDispatch(Env_1.Env.refName(), inputs);
         if (res.status === 204) {
             core.info(`Dispatched Pipeline CD for ${Env_1.Env.refName()} -> ${inputs.environment} ` +
                 `(${Object.keys(inputs).join(', ')}).`);
             return;
         }
-        const body = await res.text();
+        let body = await res.text();
+        // The ref is only where the CD reads its workflow FILE from - the inputs above
+        // are what decide which build gets deployed. So a ref that no longer exists is
+        // recoverable, and it is not an edge case: "auto-delete head branch" removes the
+        // branch the moment the PR merges, which can land between this job starting and
+        // this step running. On 2026-08-03 that raced desktop-app's CI into a red badge
+        // over a perfectly good build. Retry on the default branch and say so.
+        if (res.status === 422 && body.includes('No ref found for')) {
+            const fallback = await this.defaultBranch();
+            core.warning(`Branch '${Env_1.Env.refName()}' no longer exists - it was most likely auto-deleted when its ` +
+                `PR merged, while this run was still going. Re-dispatching Pipeline CD from '${fallback}'. ` +
+                `Only the workflow file is read from there; the deploy still targets ` +
+                `${inputs.environment} with the inputs resolved above.`);
+            res = await this.postDispatch(fallback, inputs);
+            if (res.status === 204) {
+                core.info(`Dispatched Pipeline CD from ${fallback} -> ${inputs.environment}.`);
+                return;
+            }
+            body = await res.text();
+        }
         // A 422 means the target workflow does not declare one of the inputs sent. Which
         // input, and whether that is the repo's fault, depends entirely on the handoff kind
         // - so name it rather than making the reader work it out from a raw API body.
         if (res.status === 422) {
-            const hint = kind === 'artifact'
-                ? `This repo promotes a build artifact, so 'run_id' is required: sha_tag alone cannot ` +
-                    `identify the bundle when the pushed commit is a squash merge that was never built. ` +
-                    `Declare a 'run_id' input in this repo's pipeline-cd.yml.`
-                : `This repo promotes by image tag and this stage sends no 'run_id', so the missing input ` +
-                    `is 'sha_tag' or 'environment'. Declare both in this repo's pipeline-cd.yml.`;
+            // Never blame the inputs for a missing ref: that hint sent a reader editing a
+            // pipeline-cd.yml that was not broken.
+            const hint = body.includes('No ref found for')
+                ? `The branch this run is on does not exist on the remote, and neither does the ` +
+                    `fallback. Nothing is wrong with this repo's pipeline-cd.yml - deploy manually.`
+                : kind === 'artifact'
+                    ? `This repo promotes a build artifact, so 'run_id' is required: sha_tag alone cannot ` +
+                        `identify the bundle when the pushed commit is a squash merge that was never built. ` +
+                        `Declare a 'run_id' input in this repo's pipeline-cd.yml.`
+                    : `This repo promotes by image tag and this stage sends no 'run_id', so the missing input ` +
+                        `is 'sha_tag' or 'environment'. Declare both in this repo's pipeline-cd.yml.`;
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Pipeline CD refused the dispatch (HTTP 422): ${body}\n${hint}`);
         }
         throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Dispatching Pipeline CD failed with HTTP ${res.status}: ${body}`);
+    }
+    static postDispatch(ref, inputs) {
+        return fetch(`${this.api}/repos/${Env_1.Env.repository()}/actions/workflows/pipeline-cd.yml/dispatches`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ ref, inputs }) });
+    }
+    /** Not hardcoded to 'main': this org still has repos whose default branch is 'master'. */
+    static async defaultBranch() {
+        try {
+            const repo = await this.get(`/repos/${Env_1.Env.repository()}`);
+            return repo.default_branch || 'main';
+        }
+        catch {
+            return 'main';
+        }
     }
     static headers() {
         const token = Env_1.Env.get('GITHUB_TOKEN');
