@@ -7998,18 +7998,66 @@ class QualityConfigLoader {
             this.packageJson()?.eslintConfig !== undefined;
         return hasEslintConfig ? [install, 'npx eslint .'] : null;
     }
-    /** Unit-test commands inferred from the repo layout, or null when there is no test runner. */
+    /**
+     * Unit-test commands inferred from the repo layout, or null when the repo has no
+     * tests to run.
+     *
+     * Detection requires actual TEST FILES, not just a runner. Every CRA repo ships a
+     * `test` script whether or not anyone ever wrote a test, and pairing that with
+     * `--passWithNoTests` produced the worst possible outcome: a green `Unit Test`
+     * check on a repo with zero tests. A check that reports success without having
+     * verified anything is more dangerous than no check at all — it is read as
+     * evidence. When there is nothing to run, the stage is not injected and the job
+     * shows as skipped, which is the honest answer.
+     *
+     * `--passWithNoTests` is deliberately NOT passed once test files do exist: at that
+     * point "no tests found" means the runner's testMatch is not seeing them, and that
+     * is a real problem worth surfacing.
+     */
     static detectTestCommands() {
-        if (this.exists('pom.xml'))
-            return ['mvn -B test'];
-        if (this.exists('build.gradle') || this.exists('build.gradle.kts'))
-            return ['./gradlew test'];
-        if (this.exists('package.json') && this.hasNpmScript('test')) {
+        if (this.exists('pom.xml')) {
+            return this.exists('src/test') ? ['mvn -B test'] : null;
+        }
+        if (this.exists('build.gradle') || this.exists('build.gradle.kts')) {
+            return this.exists('src/test') ? ['./gradlew test'] : null;
+        }
+        if (this.exists('package.json') && this.hasNpmScript('test') && this.hasJsTestFiles()) {
             // CI=true makes CRA/Jest run once and exit; without it `react-scripts test`
             // sits in watch mode and the job burns its timeout instead of reporting.
-            return [this.npmInstall(), 'CI=true npm test -- --watchAll=false --passWithNoTests'];
+            return [this.npmInstall(), 'CI=true npm test -- --watchAll=false'];
         }
         return null;
+    }
+    /** True when the repo contains at least one *.test.* / *.spec.* file or a __tests__ dir. */
+    static hasJsTestFiles() {
+        const SKIP = new Set(['node_modules', '.git', 'build', 'dist', 'coverage', '.next']);
+        const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
+        const walk = (dir, depth) => {
+            if (depth > 8)
+                return false;
+            let entries;
+            try {
+                entries = fs.readdirSync(dir, { withFileTypes: true });
+            }
+            catch {
+                return false;
+            }
+            for (const entry of entries) {
+                if (entry.isDirectory()) {
+                    if (SKIP.has(entry.name))
+                        continue;
+                    if (entry.name === '__tests__')
+                        return true;
+                    if (walk(`${dir}/${entry.name}`, depth + 1))
+                        return true;
+                }
+                else if (TEST_FILE.test(entry.name)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        return walk('.', 0);
     }
     // ── Helpers ─────────────────────────────────────────────────────────────────
     static npmInstall() {
