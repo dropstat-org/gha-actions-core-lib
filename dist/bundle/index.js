@@ -3854,6 +3854,7 @@ const ErrorCode_1 = __nccwpck_require__(9727);
 const StageName_1 = __nccwpck_require__(90969);
 const ActionsType_1 = __nccwpck_require__(15515);
 const Env_1 = __nccwpck_require__(45188);
+const ImageSHA_1 = __nccwpck_require__(2870);
 /** Environment a pushed branch deploys to, or null when it deploys nowhere. */
 function environmentFor(ref) {
     const branch = ref.replace(/^refs\/heads\//, '');
@@ -3941,7 +3942,12 @@ class TriggerCdStage {
         // `sha-<merge commit>` there just makes the deploy fail with ECR_IMAGE_NOT_FOUND.
         const buildsOwn = buildsItsOwnImage(ref, Env_1.Env.isBranchCreation());
         const inputs = {
-            sha_tag: buildsOwn ? `sha-${Env_1.Env.sha()}` : '',
+            // Short form on purpose: `sha-<7>` is what PublishStage actually tags in ECR
+            // (shortSHA / normalizeShaTag), and it is also what the CD caller's run-name
+            // interpolates verbatim — GitHub expressions cannot truncate, so a 40-char
+            // value here is a 40-char run title. normalizeShaTag would collapse the long
+            // form anyway; sending it short keeps the display honest for free.
+            sha_tag: buildsOwn ? `sha-${(0, ImageSHA_1.shortSHA)(Env_1.Env.sha())}` : '',
             environment,
         };
         if (!buildsOwn) {
