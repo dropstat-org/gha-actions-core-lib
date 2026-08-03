@@ -683,6 +683,7 @@ class ActionYaml {
             ...data.metadata,
             artifactId: `${data.metadata.projectId}-${data.metadata.serviceId}`,
             commitHash: data.metadata.commitHash ?? (0, ImageSHA_1.resolveImageSHA)(),
+            commitHashAutoResolved: data.metadata.commitHash == null,
         };
         this.tools = data.tools;
         this.env = data.env;
@@ -2945,12 +2946,19 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // Only demand a build tag when nothing else already named the image: an
         // explicit sha_tag / release-cut alias is the escape hatch out of exactly the
         // "commit was never built" situation, so asking for the throw first would
-        // close the door on the way out. Use || not ??: ActionYaml resolves
-        // commitHash at parse time and stores '' when there is no tag, which is a
-        // value, not absent - ?? would keep the empty string and never ask again.
+        // close the door on the way out.
+        //
+        // An EXPLICIT metadata.commitHash is an operator naming the image and is
+        // honoured as-is. The auto-resolved one is not: it carries the BUILD answer
+        // (the commit itself, tag or no tag) because CI needs it that way, and on an
+        // unbuilt commit that names an image which does not exist in ECR. So when it
+        // was not explicit, ask the deploy question properly and fail with a
+        // diagnosis instead of a pull error.
         const shaOfCommit = (resolvedTag || cutTag)
             ? ''
-            : (this.config.metadata.commitHash || (0, ImageSHA_1.resolveImageSHA)({ required: true }));
+            : (this.config.metadata.commitHashAutoResolved
+                ? (0, ImageSHA_1.resolveImageSHA)({ required: true })
+                : (this.config.metadata.commitHash ?? ''));
         const imageTag = resolvedTag || cutTag || (shaOfCommit ? `sha-${(0, ImageSHA_1.shortSHA)(shaOfCommit)}` : '');
         if (!imageTag) {
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.ECR_IMAGE_NOT_FOUND, 'Cannot resolve the image sha to deploy: SHA_TAG is empty and no commit sha is ' +
@@ -5106,6 +5114,8 @@ const StageMessage_1 = __nccwpck_require__(22238);
 const ImageSHA_1 = __nccwpck_require__(2870);
 const DockerArtifactManager_1 = __nccwpck_require__(68942);
 const GitVersionResolver_1 = __nccwpck_require__(46601);
+const ActionYaml_1 = __nccwpck_require__(9192);
+const ErrorCode_1 = __nccwpck_require__(9727);
 class PublishStage extends AbstractStage_1.AbstractStage {
     archive = new ArchiveManager_1.ArchiveManager();
     async run(stage) {
@@ -5113,7 +5123,17 @@ class PublishStage extends AbstractStage_1.AbstractStage {
         try {
             const registry = stage.publish?.docker?.registry ?? 'ghcr';
             const image = stage.publish?.docker?.image ?? this.deriveImage();
-            const fullSHA = this.config.metadata.commitHash ?? 'unknown';
+            // Every tag this stage writes is derived from fullSHA, so an empty one is
+            // not a cosmetic defect: on 2026-08-03 it published an image tagged
+            // literally `sha-`, plus `feature-sha-` and `v2026.08.03-sha-`, and then
+            // failed on `git push built/sha-` - a garbage artifact in ECR and no build
+            // marker. Refuse to publish anything rather than publish it unnamed.
+            const fullSHA = this.config.metadata.commitHash ?? '';
+            if (!fullSHA.trim()) {
+                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_IMAGE_REF, 'Cannot publish: the commit sha is empty, so every image tag would be ' +
+                    'the unusable literal "sha-". Expected metadata.commitHash or GITHUB_SHA ' +
+                    'to be set.');
+            }
             const shaTag = `sha-${(0, ImageSHA_1.shortSHA)(fullSHA)}`;
             // metadata.version is optional — resolve via GitVersionResolver (explicit →
             // GitVersion → date fallback) so the tag is never "vundefined-...".
@@ -6738,23 +6758,28 @@ exports.BUILD_TAG_PREFIX = 'built/sha-';
  *   2. The `built/sha-*` tag on the merged-in commit (or on GITHUB_SHA itself when
  *      it is not a merge), following the merged-in side through any number of
  *      chained promotion merges. Requires a non-shallow checkout WITH tags.
- *   3. Nothing — an empty string, or a throw when the caller passes
- *      `{ required: true }`. See below for which is which.
+ *   3. `start` itself — the commit being worked on. This is the CORRECT answer
+ *      for the build side, and a throw instead when the caller passes
+ *      `{ required: true }`. See below.
  *
- * WHY `required` IS OPT-IN. "No build tag" is only an error when something is
- * about to be deployed. ActionYaml's constructor calls this while parsing
- * action.yaml, which happens in EVERY stage of BOTH phases - including CI on a
- * feature branch, where the commit legitimately has no tag yet because
- * PublishStage writes it later in that very run. Throwing unconditionally broke
- * the Config stage of every CI run in the org within four minutes of release on
- * 2026-08-03. So parsing gets the empty string, and only the stages that
- * actually need an image ask for the throw.
+ * THIS FUNCTION ANSWERS TWO DIFFERENT QUESTIONS and the default must serve the
+ * build one:
  *
- * Fail-closed is not weakened by that default: the two callers that deploy or
- * promote already treat an empty sha as a hard error of their own
- * (ECSDeployStage -> ECR_IMAGE_NOT_FOUND, AppRelease.sourceShaTag). `required`
- * exists so the failure names the actual cause instead of surfacing as an
- * opaque missing-image error.
+ *   - "which commit am I building?"  -> CI / PublishStage. The answer is simply
+ *     the commit itself. It has no build tag yet, by definition: PublishStage is
+ *     what writes that tag, later in this very run.
+ *   - "which commit's image should I deploy?" -> CD. Here the commit MUST carry
+ *     a tag, because an untagged commit has no image, and picking something
+ *     nearby is how qa shipped a three-week-old build for three days.
+ *
+ * Conflating them cost two outages on 2026-08-03. Making the tag mandatory for
+ * everyone broke the Config stage of every CI run in the org four minutes after
+ * release. Then returning '' for the build side pushed an image literally tagged
+ * `sha-` to ECR, plus `feature-sha-` and `v2026.08.03-sha-`, because
+ * PublishStage builds its tag from this value.
+ *
+ * So the default is the build answer, and only the deploy side opts into
+ * `required`. Do not "simplify" this back into one behaviour.
  */
 function resolveImageSHA(options = {}) {
     if (process.env.IMAGE_SHA)
@@ -6767,7 +6792,7 @@ function resolveImageSHA(options = {}) {
     if (tagged)
         return tagged;
     if (!options.required)
-        return '';
+        return start;
     throw new Error(`No build tag (${exports.BUILD_TAG_PREFIX}*) found for ${start}.\n` +
         'The commit being deployed was never built, so there is no image to deploy. ' +
         'The usual cause is a commit pushed to the branch after its CI run - the merge ' +
