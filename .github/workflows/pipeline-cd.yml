@@ -216,6 +216,15 @@ jobs:
   # Aprobadores: variable CD_APPROVERS (org/repo).
   approval:
     name: Approval
+    # Un run viejo aprobado tarde se aplica DESPUES de uno nuevo y pisa qa con un
+    # build anterior -- paso el 2026-08-03: el CD de las 13:30 se aprobo 13:56, ya
+    # desplegado el de las 13:48. La compuerta no creo el problema pero abrio la
+    # ventana de segundos a media hora. Al entrar un run nuevo al grupo, el viejo
+    # que sigue esperando aprobacion se cancela; los jobs de deploy piden
+    # result == success || skipped, asi que un cancelled no despliega nada.
+    concurrency:
+      group: cd-approval-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
+      cancel-in-progress: true
     needs: [config, plan, pre_deploy]
     if: |
       always() &&
@@ -224,7 +233,7 @@ jobs:
       needs.plan.result != 'failure' &&
       needs.pre_deploy.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       issues: write
     steps:
@@ -238,7 +247,14 @@ jobs:
           app-id: ${{ secrets.CD_APPROVAL_APP_ID }}
           private-key: ${{ secrets.CD_APPROVAL_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+      # continue-on-error: el paso falla por DOS causas muy distintas -- un humano
+      # que escribio "denied", o un 5xx de la API de GitHub. El 2026-08-03 fue lo
+      # segundo: el gate creo el issue #5451 y murio en el POST del comentario
+      # decorativo (500), matando un deploy ya aprobable. El paso siguiente separa
+      # los dos casos ANTES de decidir si se reintenta.
       - name: Manual approval gate
+        id: gate
+        continue-on-error: true
         uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
         with:
           secret: ${{ steps.app-token.outputs.token || github.token }}
@@ -246,6 +262,70 @@ jobs:
           minimum-approvals: 1
           issue-title: "Aprobar deploy terraform: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
           issue-body: "Revisa el plan del CI antes de aprobar. Comenta approved para aplicar o denied para cancelar."
+          exclude-workflow-initiator-as-approver: false
+
+      - name: Classify the gate failure
+        id: verdict
+        if: steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          TITLE: "Aprobar deploy terraform: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          api() {
+            curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                     -H "Accept: application/vnd.github+json" \
+                     "https://api.github.com/repos/$REPO/$1"
+          }
+
+          # La pregunta no es "cuanto tardo en fallar" -- esa heuristica confunde una
+          # denegacion rapida con una caida. La pregunta es si alguien escribio la
+          # palabra: se lee el issue que este mismo job acaba de abrir.
+          num=$(api "issues?state=all&sort=created&direction=desc&per_page=50" \
+                  | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | first | .number // empty')
+
+          if [ -z "$num" ]; then
+            # Ni siquiera llego a crear el issue: no hubo nada que denegar.
+            echo "No se encontro el issue de aprobacion - la falla es anterior a la votacion."
+            echo "denied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # gsub sobre [^a-z] en vez de \s: los backslashes no sobreviven la vuelta
+          # YAML -> shell -> jq, y de paso esto tolera "Denied." o ":x: denied".
+          by=$(api "issues/$num/comments?per_page=100" \
+                 | jq -r '[.[] | .body |= (ascii_downcase | gsub("[^a-z]"; ""))
+                            | select(.body == "denied" or .body == "deny" or .body == "no")]
+                          | last | .user.login // empty')
+
+          if [ -n "$by" ]; then
+            echo "Denegado por $by en el issue #$num."
+            echo "denied=true"  >> "$GITHUB_OUTPUT"
+            echo "by=$by"       >> "$GITHUB_OUTPUT"
+          else
+            echo "Issue #$num sin denegacion: el gate se cayo solo."
+            echo "denied=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Human denial - stop here
+        if: steps.gate.outcome == 'failure' && steps.verdict.outputs.denied == 'true'
+        run: |
+          echo "::error::Deploy denegado por ${{ steps.verdict.outputs.by }} en el issue de aprobacion. No se reintenta."
+          exit 1
+
+      # Solo se llega aca si NO hubo denegacion: el gate se cayo solo. Se abre un
+      # issue nuevo y se vuelve a esperar la aprobacion -- no se da por aprobado nada.
+      - name: Manual approval gate (retry)
+        if: steps.gate.outcome == 'failure' && steps.verdict.outputs.denied != 'true'
+        uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
+        with:
+          secret: ${{ steps.app-token.outputs.token || github.token }}
+          approvers: ${{ vars.CD_APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "Aprobar deploy terraform (reintento): ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          issue-body: "El gate anterior se cayo por un error transitorio de la API de GitHub, no por una denegacion. Comenta approved para aplicar o denied para cancelar."
           exclude-workflow-initiator-as-approver: false
 
   # ── Review gate (app): ECS/S3 deploys a uat/prod requieren aprobacion manual ──
@@ -259,6 +339,15 @@ jobs:
   # certifica.
   approval_app:
     name: Approval (app qa/uat/prod)
+    # Un run viejo aprobado tarde se aplica DESPUES de uno nuevo y pisa qa con un
+    # build anterior -- paso el 2026-08-03: el CD de las 13:30 se aprobo 13:56, ya
+    # desplegado el de las 13:48. La compuerta no creo el problema pero abrio la
+    # ventana de segundos a media hora. Al entrar un run nuevo al grupo, el viejo
+    # que sigue esperando aprobacion se cancela; los jobs de deploy piden
+    # result == success || skipped, asi que un cancelled no despliega nada.
+    concurrency:
+      group: cd-approval-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
+      cancel-in-progress: true
     needs: [config]
     if: |
       needs.config.outputs.ActionsCoreLib_type != 'terraform' &&
@@ -267,7 +356,7 @@ jobs:
        needs.config.outputs.deploy_environment == 'uat' ||
        needs.config.outputs.deploy_environment == 'prod')
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       issues: write
     steps:
@@ -278,7 +367,12 @@ jobs:
           app-id: ${{ secrets.CD_APPROVAL_APP_ID }}
           private-key: ${{ secrets.CD_APPROVAL_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+      # Ver el comentario del gate de terraform: continue-on-error + clasificacion
+      # explicita, porque el paso falla igual por una denegacion humana que por un
+      # 5xx de la API, y reintentar a ciegas reabriria una compuerta ya cerrada.
       - name: Manual approval gate
+        id: gate
+        continue-on-error: true
         uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
         with:
           secret: ${{ steps.app-token.outputs.token || github.token }}
@@ -288,10 +382,75 @@ jobs:
           issue-body: "Deploy ECS/S3 a ${{ needs.config.outputs.deploy_environment }}. Comenta approved para desplegar o denied para cancelar."
           exclude-workflow-initiator-as-approver: false
 
+      - name: Classify the gate failure
+        id: verdict
+        if: steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          TITLE: "Aprobar deploy app (${{ needs.config.outputs.deploy_environment }}): ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          api() {
+            curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                     -H "Accept: application/vnd.github+json" \
+                     "https://api.github.com/repos/$REPO/$1"
+          }
+
+          # La pregunta no es "cuanto tardo en fallar" -- esa heuristica confunde una
+          # denegacion rapida con una caida. La pregunta es si alguien escribio la
+          # palabra: se lee el issue que este mismo job acaba de abrir.
+          num=$(api "issues?state=all&sort=created&direction=desc&per_page=50" \
+                  | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | first | .number // empty')
+
+          if [ -z "$num" ]; then
+            # Ni siquiera llego a crear el issue: no hubo nada que denegar.
+            echo "No se encontro el issue de aprobacion - la falla es anterior a la votacion."
+            echo "denied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # gsub sobre [^a-z] en vez de \s: los backslashes no sobreviven la vuelta
+          # YAML -> shell -> jq, y de paso esto tolera "Denied." o ":x: denied".
+          by=$(api "issues/$num/comments?per_page=100" \
+                 | jq -r '[.[] | .body |= (ascii_downcase | gsub("[^a-z]"; ""))
+                            | select(.body == "denied" or .body == "deny" or .body == "no")]
+                          | last | .user.login // empty')
+
+          if [ -n "$by" ]; then
+            echo "Denegado por $by en el issue #$num."
+            echo "denied=true"  >> "$GITHUB_OUTPUT"
+            echo "by=$by"       >> "$GITHUB_OUTPUT"
+          else
+            echo "Issue #$num sin denegacion: el gate se cayo solo."
+            echo "denied=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Human denial - stop here
+        if: steps.gate.outcome == 'failure' && steps.verdict.outputs.denied == 'true'
+        run: |
+          echo "::error::Deploy denegado por ${{ steps.verdict.outputs.by }} en el issue de aprobacion. No se reintenta."
+          exit 1
+
+      - name: Manual approval gate (retry)
+        if: steps.gate.outcome == 'failure' && steps.verdict.outputs.denied != 'true'
+        uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367  # v1.12.0
+        with:
+          secret: ${{ steps.app-token.outputs.token || github.token }}
+          approvers: ${{ vars.CD_APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "Aprobar deploy app (${{ needs.config.outputs.deploy_environment }}) - reintento: ${{ github.repository }} @ ${{ inputs.deploy_ref || github.ref_name }}"
+          issue-body: "El gate anterior se cayo por un error transitorio de la API de GitHub, no por una denegacion. Comenta approved para desplegar o denied para cancelar."
+          exclude-workflow-initiator-as-approver: false
+
   # ── Deploy (terraform apply) ─────────────────────────────────────────────────
 
   deploy:
     name: Deploy
+    # Sin cancel: dos applies al mismo ambiente se serializan, no se descartan.
+    concurrency:
+      group: cd-deploy-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
     needs: [config, plan, pre_deploy, approval]
     environment: ${{ needs.config.outputs.deploy_environment }}
     timeout-minutes: 60
@@ -346,6 +505,9 @@ jobs:
 
   ecs_deploy:
     name: ECS Deploy
+    # Sin cancel: dos applies al mismo ambiente se serializan, no se descartan.
+    concurrency:
+      group: cd-deploy-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
     needs: [config, approval_app]
     if: |
       always() &&
@@ -409,6 +571,9 @@ jobs:
   # deploy.yaml. GITHUB_TOKEN is needed for the gh run download of the CI artifact.
   s3_deploy:
     name: S3 Deploy
+    # Sin cancel: dos applies al mismo ambiente se serializan, no se descartan.
+    concurrency:
+      group: cd-deploy-${{ github.repository }}-${{ needs.config.outputs.deploy_environment }}
     needs: [config, approval_app]
     if: |
       always() &&
