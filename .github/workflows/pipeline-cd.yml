@@ -284,23 +284,12 @@ jobs:
             exit 0
           fi
 
+          # gsub sobre [^a-z] en vez de \s: los backslashes no sobreviven la vuelta
+          # YAML -> shell -> jq, y de paso esto tolera "Denied." o ":x: denied".
           by=$(api "issues/$num/comments?per_page=100" \
-                 | jq -r '[.[] | .body |= (ascii_downcase | gsub("^\s+|\s+$"; ""))
+                 | jq -r '[.[] | .body |= (ascii_downcase | gsub("[^a-z]"; ""))
                             | select(.body == "denied" or .body == "deny" or .body == "no")]
                           | last | .user.login // empty')
-
-          if [ -n "$by" ]; then
-            echo "Denegado por $by en el issue #$num."
-            echo "denied=true"  >> "$GITHUB_OUTPUT"
-            echo "by=$by"       >> "$GITHUB_OUTPUT"
-          else
-            echo "Issue #$num sin denegacion: el gate se cayo solo."
-            echo "denied=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          by=$(gh api "repos/$REPO/issues/$num/comments" --paginate \
-                 --jq '[.[] | select((.body | ascii_downcase | gsub("^\\s+|\\s+$";"")) as $b
-                        | $b == "denied" or $b == "deny" or $b == "no")] | last | .user.login // empty')
 
           if [ -n "$by" ]; then
             echo "Denegado por $by en el issue #$num."
@@ -404,23 +393,12 @@ jobs:
             exit 0
           fi
 
+          # gsub sobre [^a-z] en vez de \s: los backslashes no sobreviven la vuelta
+          # YAML -> shell -> jq, y de paso esto tolera "Denied." o ":x: denied".
           by=$(api "issues/$num/comments?per_page=100" \
-                 | jq -r '[.[] | .body |= (ascii_downcase | gsub("^\s+|\s+$"; ""))
+                 | jq -r '[.[] | .body |= (ascii_downcase | gsub("[^a-z]"; ""))
                             | select(.body == "denied" or .body == "deny" or .body == "no")]
                           | last | .user.login // empty')
-
-          if [ -n "$by" ]; then
-            echo "Denegado por $by en el issue #$num."
-            echo "denied=true"  >> "$GITHUB_OUTPUT"
-            echo "by=$by"       >> "$GITHUB_OUTPUT"
-          else
-            echo "Issue #$num sin denegacion: el gate se cayo solo."
-            echo "denied=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          by=$(gh api "repos/$REPO/issues/$num/comments" --paginate \
-                 --jq '[.[] | select((.body | ascii_downcase | gsub("^\\s+|\\s+$";"")) as $b
-                        | $b == "denied" or $b == "deny" or $b == "no")] | last | .user.login // empty')
 
           if [ -n "$by" ]; then
             echo "Denegado por $by en el issue #$num."
