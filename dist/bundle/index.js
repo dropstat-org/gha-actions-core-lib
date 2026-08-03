@@ -935,7 +935,11 @@ async function run() {
         // below, which is the whole reason it lives on this shared path rather than
         // in OutputWriter: the config job and the stage job parse action.yaml
         // separately, and both have to see the same stage list.
-        await QualityStageInjector_1.QualityStageInjector.inject(config, branchType, workflow);
+        // reportGaps only from the config job: the injector runs on the shared path, so
+        // every stage job would republish the same 'no tests / no linter' check.
+        await QualityStageInjector_1.QualityStageInjector.inject(config, branchType, workflow, {
+            reportGaps: stageName === StageName_1.StageName.CONFIG,
+        });
         // Same shared-path reasoning, opposite direction: dso-semgrep can switch the
         // mandatory semgrep stage off for a repo. Runs after the injection so the final
         // stage list both jobs see is identical.
@@ -8153,6 +8157,7 @@ exports.QualityStageInjector = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const StageName_1 = __nccwpck_require__(90969);
 const QualityConfigLoader_1 = __nccwpck_require__(16839);
+const NeutralCheckReporter_1 = __nccwpck_require__(64691);
 /**
  * Adds `unit_test` and `linter` to the parsed config when the repo has not declared
  * them, so lint and tests run without every repo having to edit its action.yaml or
@@ -8173,7 +8178,7 @@ const QualityConfigLoader_1 = __nccwpck_require__(16839);
  * overrides. Whether a failure is fatal is decided in dso-quality, never here.
  */
 class QualityStageInjector {
-    static async inject(config, branchType, workflow) {
+    static async inject(config, branchType, workflow, opts = {}) {
         // CD promotes an artifact that CI already checked; re-linting it there would
         // only add minutes and a second chance to fail on the way to production.
         if ((process.env.PIPELINE_PHASE ?? '').toLowerCase() === 'cd')
@@ -8186,6 +8191,20 @@ class QualityStageInjector {
             insertAfter: [StageName_1.StageName.COMPILE],
             insertBefore: [StageName_1.StageName.LINTER, StageName_1.StageName.SEMGREP, StageName_1.StageName.SONARQUBE,
                 StageName_1.StageName.CHECKOV, StageName_1.StageName.TRIVY, StageName_1.StageName.PUBLISH],
+            reportGaps: opts.reportGaps,
+            gapTitle: 'This repo has no unit tests',
+            gapDetail: [
+                'No test files were found in the repository, and `dso-quality` declares no',
+                '`unit_test.commands` for it, so there is nothing to run and the stage was skipped.',
+                '',
+                'Detection looks for:',
+                '- `pom.xml` or `build.gradle[.kts]` with a `src/test` directory',
+                '- `package.json` with a `test` script AND at least one `*.test.*` / `*.spec.*`',
+                '  file or a `__tests__` directory',
+                '',
+                'This alert is `neutral`: it never blocks a merge. It exists because a silently',
+                'skipped test stage is indistinguishable from a passing one at a glance.',
+            ].join('\n'),
         });
         await this.injectOne(config, branchType, workflow, {
             stageName: StageName_1.StageName.LINTER,
@@ -8194,12 +8213,25 @@ class QualityStageInjector {
             insertAfter: [StageName_1.StageName.UNIT_TEST, StageName_1.StageName.COMPILE],
             insertBefore: [StageName_1.StageName.SEMGREP, StageName_1.StageName.SONARQUBE,
                 StageName_1.StageName.CHECKOV, StageName_1.StageName.TRIVY, StageName_1.StageName.PUBLISH],
+            reportGaps: opts.reportGaps,
+            gapTitle: 'This repo has no linter',
+            gapDetail: [
+                'No lint setup was found in the repository, and `dso-quality` declares no',
+                '`lint.commands` for it, so the stage was skipped.',
+                '',
+                'Detection looks for a `package.json` with either a `lint` script or an ESLint',
+                'config (`eslint.config.*`, `.eslintrc*`, or an `eslintConfig` key).',
+                '',
+                'This alert is `neutral`: it never blocks a merge.',
+            ].join('\n'),
         });
     }
     static async injectOne(config, branchType, workflow, opts) {
         const { stageName, entry, detect, insertAfter, insertBefore } = opts;
         if (config.stages.some(s => s.name === stageName))
             return; // repo declared it
+        // An explicit `enabled: false` in dso-quality is a decision someone already made
+        // and reviewed — not a gap. No alert.
         if (entry?.enabled === false) {
             core.info(`[quality] ${stageName} disabled for this repo in dso-quality`);
             return;
@@ -8213,7 +8245,17 @@ class QualityStageInjector {
             return;
         const commands = entry?.commands?.length ? entry.commands : detect();
         if (!commands?.length) {
-            core.info(`[quality] no ${stageName} commands configured or detected — skipping`);
+            core.warning(`[quality] no ${stageName} commands configured or detected — skipping`);
+            // The gap is the finding. A stage that is skipped for lack of anything to run
+            // looks exactly like a stage that ran and passed, and that is how a repo ends up
+            // believing it is covered. Reported as `neutral`, so it is visible on the PR
+            // without blocking anyone — nobody gets stopped for a gap they did not create.
+            //
+            // Only from the config job (reportGaps): the injector runs on the shared load
+            // path, so every stage job would otherwise publish the same check again.
+            if (opts.reportGaps) {
+                await NeutralCheckReporter_1.NeutralCheckReporter.report(stageName, opts.gapTitle, opts.gapDetail);
+            }
             return;
         }
         // soft_fail is opt-OUT: it has to be explicitly set to false in dso-quality for
