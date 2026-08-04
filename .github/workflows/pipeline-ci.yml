@@ -100,9 +100,14 @@ jobs:
       # compile-output" in every frontend run, which reads like a broken pipeline
       # and sent us looking at Sonar twice. This marker makes the artifact always
       # exist, so the download is a real no-op instead of a swallowed error.
+      #
+      # NOT a dotfile: upload-artifact v4.4+ excludes hidden files unless
+      # `include-hidden-files: true`, so the original `.compile-output` was
+      # silently dropped and this marker never actually worked - the red error it
+      # was meant to remove kept showing up in every frontend run.
       - name: Marker so compile-output always exists
         if: always()
-        run: echo "non-JVM repos upload only this" > .compile-output
+        run: echo "non-JVM repos upload only this" > compile-output.txt
       # Share compiled classes so the SonarQube job (separate workspace) can run
       # the Java/JVM sensor (needs sonar.java.binaries), and share the built jar
       # so the Publish job's Docker build doesn't have to recompile from scratch.
@@ -112,7 +117,7 @@ jobs:
         with:
           name: compile-output
           path: |
-            .compile-output
+            compile-output.txt
             target/classes
             build/classes
             target/*.jar
