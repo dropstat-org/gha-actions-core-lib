@@ -2843,10 +2843,42 @@ const PROMOTION_EVIDENCE = {
  *       service:            demo-dev
  *       container:          demo-dev
  *       wait_for_stability: true
+ *       # wait_timeout_minutes: 20   (optional — default 10, the AWS CLI waiter default)
  *       # image: dropstat/demo   (optional — lib uses ECR_REGISTRY/image:env)
  *       # image_tag: $SHA_TAG    (optional — defaults to the commit's sha-<short> tag)
  */
 class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
+    /**
+     * How long a single `aws ecs wait services-stable` lasts: 40 attempts x 15s.
+     * AWS CLI v2 dropped `--waiter-config`, so the only way to wait longer than
+     * this is to call the waiter again — the wait below runs it in rounds.
+     */
+    static WAITER_ROUND_MINUTES = 10;
+    /** Kept at the AWS CLI default so an action.yaml that says nothing is unchanged. */
+    static DEFAULT_WAIT_MINUTES = 10;
+    /** A waiter this long means something is wrong that waiting will not fix. */
+    static MAX_WAIT_MINUTES = 60;
+    /**
+     * Clamps wait_timeout_minutes into a range the waiter can actually express.
+     * A bad value falls back to the default with a warning rather than failing the
+     * deploy: the image is already registered by the time we get here, so refusing
+     * to wait would abandon a running rollout over a typo in a config field.
+     */
+    static waitMinutesOf(configured) {
+        if (configured === undefined)
+            return ECSDeployStage.DEFAULT_WAIT_MINUTES;
+        if (!Number.isFinite(configured) || configured <= 0) {
+            core.warning(`wait_timeout_minutes must be a positive number, got '${configured}' — ` +
+                `using the default of ${ECSDeployStage.DEFAULT_WAIT_MINUTES} min`);
+            return ECSDeployStage.DEFAULT_WAIT_MINUTES;
+        }
+        if (configured > ECSDeployStage.MAX_WAIT_MINUTES) {
+            core.warning(`wait_timeout_minutes ${configured} exceeds the ${ECSDeployStage.MAX_WAIT_MINUTES} min ceiling — ` +
+                'capping. A rollout that has not converged by then is failing, not slow.');
+            return ECSDeployStage.MAX_WAIT_MINUTES;
+        }
+        return configured;
+    }
     // ── Branch routing ─────────────────────────────────────────────────────────
     async onDevelop(stage) {
         await this.deploy(stage, Environment_1.Environment.QA);
@@ -2966,6 +2998,8 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                 'tag - environment aliases are audit markers, not deploy sources.');
         }
         const waitStable = cfg.wait_for_stability !== false;
+        const waitMinutes = ECSDeployStage.waitMinutesOf(cfg.wait_timeout_minutes);
+        const waitRounds = Math.ceil(waitMinutes / ECSDeployStage.WAITER_ROUND_MINUTES);
         // ── ECS deploy role ───────────────────────────────────────────────────────
         // Priority: deploy.yaml[env].deploy_role > ECS_DEPLOY_ROLE env var (legacy).
         // Using deploy.yaml is strongly preferred: the role is keyed by the lib-derived
@@ -3079,11 +3113,31 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         ]);
         // ── 5. Wait for service stability ─────────────────────────────────────────
         if (waitStable) {
-            core.info('   Waiting for service stability...');
-            await exec.exec('aws', [
-                'ecs', 'wait', 'services-stable',
-                '--cluster', cluster, '--services', service, '--region', region,
-            ]);
+            core.info(`   Waiting for service stability (up to ${waitMinutes} min)...`);
+            // One waiter call lasts 10 min and CLI v2 has no --waiter-config to extend
+            // it, so a longer budget is spent as consecutive rounds. 10 min is not
+            // enough for a slow-starting app that loses one task to a health check:
+            // the retry alone costs another full start-up. Giving up then fails a
+            // deploy that is still converging - the service goes stable minutes later
+            // and the pipeline has already reported red, leaving the image without its
+            // promotion tag, which then blocks the next environment at the gate.
+            let stable = false;
+            for (let round = 1; round <= waitRounds && !stable; round++) {
+                const code = await exec.exec('aws', [
+                    'ecs', 'wait', 'services-stable',
+                    '--cluster', cluster, '--services', service, '--region', region,
+                ], { ignoreReturnCode: true });
+                stable = code === 0;
+                if (!stable && round < waitRounds) {
+                    core.info(`   Still rolling out after ${round * ECSDeployStage.WAITER_ROUND_MINUTES} min, ` +
+                        `waiting again (round ${round + 1}/${waitRounds})...`);
+                }
+            }
+            if (!stable) {
+                throw new Error(`Service ${service} did not reach a stable state within ${waitMinutes} min. ` +
+                    'The rollout may still be converging - check the ECS service events and target ' +
+                    'group health before re-running.');
+            }
             core.info('✅ Service stable');
         }
         else {
