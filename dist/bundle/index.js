@@ -915,6 +915,7 @@ const StageRegistry_1 = __nccwpck_require__(38600);
 const OutputWriter_1 = __nccwpck_require__(73021);
 const QualityStageInjector_1 = __nccwpck_require__(70934);
 const SemgrepToggle_1 = __nccwpck_require__(99528);
+const StaticReleaseInjector_1 = __nccwpck_require__(97428);
 const BranchDetector_1 = __nccwpck_require__(90609);
 const StageName_1 = __nccwpck_require__(90969);
 const ValidateApproverStage_1 = __nccwpck_require__(18487);
@@ -945,6 +946,9 @@ async function run() {
         // mandatory semgrep stage off for a repo. Runs after the injection so the final
         // stage list both jobs see is identical.
         await SemgrepToggle_1.SemgrepToggle.apply(config);
+        // Static frontends get `release` for free (git tag + GitHub Release + the dist
+        // bundle as an asset). Same shared-path reasoning as the two above.
+        StaticReleaseInjector_1.StaticReleaseInjector.inject(config, branchType, workflow);
         workflow.checkStages(config.stages, branchType);
         if (stageName === StageName_1.StageName.CONFIG) {
             await OutputWriter_1.OutputWriter.writeFlags(config, branchType, workflow);
@@ -3539,6 +3543,7 @@ const Environment_1 = __nccwpck_require__(27413);
 const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const DeploySummary_1 = __nccwpck_require__(54086);
+const DeployProvenance_1 = __nccwpck_require__(57847);
 /**
  * S3DeployStage — static frontend deploy (S3 sync + CloudFront invalidation).
  *
@@ -3768,6 +3773,13 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             commit: shortSha || process.env.GITHUB_SHA,
             provenance,
         });
+        // Hand the release job the build this deploy actually shipped, so the GitHub
+        // Release can carry that exact bundle. Recorded here rather than re-derived
+        // there because this is the only place that knows: see DeployProvenance.
+        // fromRun 0 means the dist was already in the workspace (no artifact to point at).
+        if (fromRun) {
+            await DeployProvenance_1.DeployProvenance.record({ artifactRunId: fromRun, artifact, sha: shortSha || undefined });
+        }
     }
     /**
      * Downloads the dist artifact produced by the CI build run (build-once).
@@ -4785,6 +4797,8 @@ exports.AppRelease = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const AbstractReleaseStage_1 = __nccwpck_require__(10848);
 const Environment_1 = __nccwpck_require__(27413);
+const StageName_1 = __nccwpck_require__(90969);
+const DeployProvenance_1 = __nccwpck_require__(57847);
 const ImageSHA_1 = __nccwpck_require__(2870);
 const GitVersionResolver_1 = __nccwpck_require__(46601);
 const ActionYaml_1 = __nccwpck_require__(9192);
@@ -4856,7 +4870,7 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         if (env !== Environment_1.Environment.PROD)
             return;
         await this.tagStable(stage);
-        await this.createGitTag();
+        await this.createGitTag(stage);
     }
     async onPullRequest(_stage) {
         core.info('AppRelease: PR is a Trivy gate only — promotion happens after merge');
@@ -4922,7 +4936,7 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         await this.archive.moveAndPublish({ ...docker, tag: source }, { ...docker, tag: env });
         core.info(`Promoted ${docker.image}:${source} → ${docker.image}:${env}`);
     }
-    async createGitTag() {
+    async createGitTag(stage) {
         // version is optional — resolve (explicit → GitVersion → date) so the tag is
         // never "vundefined-...". resolve() already appends -sha-<short>.
         const resolved = await GitVersionResolver_1.GitVersionResolver.resolve(this.config.metadata.version, this.config.metadata.commitHash);
@@ -4936,7 +4950,109 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         catch {
             core.info(`Tag ${tag} already exists — skipping tag push`);
         }
-        await this.createGitHubRelease(tag);
+        const releaseId = await this.createGitHubRelease(tag);
+        // Only static frontends: a backend's artifact of record is the stable-sha-xxx
+        // image in ECR, which tagStable() just created. Re-uploading its jar here would
+        // duplicate that for no gain.
+        if (releaseId && !stage.publish?.docker) {
+            await this.attachDistBundle(releaseId, tag);
+        }
+    }
+    /**
+     * Attaches the deployed dist bundle to the Release as an asset.
+     *
+     * This is the whole point of giving frontends a release at all. Actions artifacts
+     * are deleted after their retention window (90 days here) and the S3 bucket is
+     * overwritten by the next deploy, so without this there is no surviving copy of
+     * what production served — nothing to audit, and nothing to roll back to. The
+     * asset never expires, which makes it the frontend's equivalent of the backend's
+     * permanent stable-sha-xxx ECR tag.
+     *
+     * The bundle is the one the deploy job actually pulled, not the branch head. Those
+     * differ more often than one would think: a CD run titled "Deploy -> qa - ccd4937"
+     * shipped a dist built on a different commit, and reading the title instead is how
+     * that goes unnoticed. Attaching anything else would put a bundle on the Release
+     * that never reached production.
+     *
+     * Two sources, in order: the provenance the deploy job recorded (authoritative -
+     * it is what that job resolved and shipped), then DEPLOY_ARTIFACT_RUN_ID. The env
+     * var alone is not enough: the workflow wires it into the s3_deploy job only, and
+     * a dispatch that pins run_id usually leaves sha_tag empty, so there is nothing
+     * left to re-resolve from. See DeployProvenance.
+     *
+     * Best-effort: the deploy has already succeeded and the site is live by now, so a
+     * failure here warns rather than failing the run and painting a good deploy red.
+     */
+    /**
+     * The Release id, or undefined when the response carries no usable body. The id is
+     * only needed to attach an asset, so a body that cannot be read costs the asset and
+     * nothing else — never the release, and never the deploy that already succeeded.
+     */
+    static async releaseIdOf(res) {
+        if (typeof res.json !== 'function')
+            return undefined;
+        const body = await res.json().catch(() => null);
+        return body?.id;
+    }
+    async attachDistBundle(releaseId, tag) {
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        const token = process.env.GITHUB_TOKEN ?? '';
+        const prov = await DeployProvenance_1.DeployProvenance.read();
+        const runId = prov ? String(prov.artifactRunId) : (process.env.DEPLOY_ARTIFACT_RUN_ID ?? '').trim();
+        if (!runId) {
+            core.warning('Release asset skipped — the deploy job recorded no provenance and DEPLOY_ARTIFACT_RUN_ID is unset, so the deployed bundle cannot be identified');
+            return;
+        }
+        // The artifact the deploy stage actually used. Prefer what it recorded; fall back
+        // to the declared name, which a repo may override in its s3_deploy block, before
+        // the derived default.
+        const s3 = this.config.stages.find(s => s.name === StageName_1.StageName.S3_DEPLOY);
+        const artifactName = prov?.artifact
+            ?? s3?.s3_deploy?.artifact
+            ?? `${this.config.metadata.serviceId}-dist`;
+        const headers = {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+        };
+        try {
+            const listRes = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${runId}/artifacts`, { headers });
+            if (!listRes.ok) {
+                core.warning(`Release asset skipped — listing artifacts of run ${runId} failed (HTTP ${listRes.status})`);
+                return;
+            }
+            const artifacts = (await listRes.json()).artifacts ?? [];
+            const match = artifacts.find(a => a.name === artifactName);
+            if (!match) {
+                core.warning(`Release asset skipped — run ${runId} has no artifact '${artifactName}'`);
+                return;
+            }
+            // The race this guards against is real: a redeploy of an old build is exactly
+            // when the source artifact is most likely to have aged out.
+            if (match.expired) {
+                core.warning(`Release asset skipped — artifact '${artifactName}' in run ${runId} has expired`);
+                return;
+            }
+            const zipRes = await fetch(match.archive_download_url, { headers });
+            if (!zipRes.ok) {
+                core.warning(`Release asset skipped — downloading '${artifactName}' failed (HTTP ${zipRes.status})`);
+                return;
+            }
+            const body = Buffer.from(await zipRes.arrayBuffer());
+            // Name it after the tag, not the artifact: two Releases of the same repo would
+            // otherwise both carry "admin-panel-dist.zip" and only the tag tells them apart.
+            const assetName = `${artifactName}-${tag}.zip`;
+            const upRes = await fetch(`https://uploads.github.com/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(assetName)}`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/zip' }, body });
+            if (upRes.ok) {
+                core.info(`Attached ${assetName} (${(body.length / 1048576).toFixed(1)} MB, from CI run ${runId}) to Release ${tag}`);
+            }
+            else {
+                core.warning(`Release asset ${assetName} upload failed (HTTP ${upRes.status})`);
+            }
+        }
+        catch (err) {
+            core.warning(`Release asset skipped — ${err.message}`);
+        }
     }
     /**
      * Creates a GitHub Release for the tag (REST API — `gh` CLI is not on the
@@ -4954,7 +5070,7 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         const token = process.env.GITHUB_TOKEN ?? '';
         if (!repo || !token) {
             core.warning('GitHub Release skipped — GITHUB_REPOSITORY/GITHUB_TOKEN not set');
-            return;
+            return undefined;
         }
         const headers = {
             Authorization: `Bearer ${token}`,
@@ -4968,14 +5084,20 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
         });
         if (res.ok) {
             core.info(`Created GitHub Release ${tag}`);
-            return;
+            return await AppRelease.releaseIdOf(res);
         }
         if (res.status === 422) {
             const body = await res.json().catch(() => null);
             const alreadyExists = body?.errors?.some((e) => e.code === 'already_exists');
             if (alreadyExists) {
-                core.info(`GitHub Release ${tag} already exists — skipping`);
-                return;
+                core.info(`GitHub Release ${tag} already exists — reusing it for the asset upload`);
+                // A re-run of the release job must still be able to attach the bundle, so
+                // resolve the existing Release rather than returning nothing. The asset
+                // upload is separately idempotent (a duplicate name 422s and warns).
+                const byTag = await fetch(`https://api.github.com/repos/${repo}/releases/tags/${tag}`, { headers });
+                if (!byTag.ok)
+                    return undefined;
+                return await AppRelease.releaseIdOf(byTag);
             }
             core.warning(`GitHub Release ${tag} auto-notes failed (${JSON.stringify(body)}) — retrying without generate_release_notes`);
             const retry = await fetch(`https://api.github.com/repos/${repo}/releases`, {
@@ -4985,13 +5107,13 @@ class AppRelease extends AbstractReleaseStage_1.AbstractReleaseStage {
             });
             if (retry.ok) {
                 core.info(`Created GitHub Release ${tag} (without auto-generated notes)`);
+                return await AppRelease.releaseIdOf(retry);
             }
-            else {
-                core.warning(`GitHub Release ${tag} failed (HTTP ${retry.status})`);
-            }
-            return;
+            core.warning(`GitHub Release ${tag} failed (HTTP ${retry.status})`);
+            return undefined;
         }
         core.warning(`GitHub Release ${tag} failed (HTTP ${res.status})`);
+        return undefined;
     }
 }
 exports.AppRelease = AppRelease;
@@ -6379,6 +6501,106 @@ class Credentials {
 }
 exports.Credentials = Credentials;
 //# sourceMappingURL=Credentials.js.map
+
+/***/ }),
+
+/***/ 57847:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DeployProvenance = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const fs = __importStar(__nccwpck_require__(79896));
+const path = __importStar(__nccwpck_require__(16928));
+const stageTransfer = async () => (await Promise.resolve().then(() => __importStar(__nccwpck_require__(24734)))).StageTransfer;
+/**
+ * Carries "which build did this deploy actually ship" from the deploy job to the
+ * release job, as an artifact of the current workflow run.
+ *
+ * The release job needs this to attach the deployed bundle to the GitHub Release,
+ * and it cannot re-derive it. DEPLOY_ARTIFACT_RUN_ID is only wired into the
+ * s3_deploy job, and re-resolving from SHA_TAG does not work either: a dispatch
+ * that pins run_id typically leaves sha_tag empty, which is exactly the case that
+ * has to work. The remaining option - "whatever CI built most recently" - is the
+ * guess that S3DeployStage.downloadDist deliberately stopped making, because a
+ * deploy that cannot prove which commit it shipped is worse than a failed one.
+ * The same standard applies to a Release: it must carry the bundle that went to
+ * production, or no bundle at all.
+ *
+ * An artifact rather than a job output because job outputs live in the workflow
+ * file, and that file reaches every consumer in the org the moment it changes.
+ * This keeps the wiring inside the library, where it can be exercised on the test
+ * bank first.
+ *
+ * Best-effort on both sides by design: recording must never fail a deploy that
+ * succeeded, and reading must never fail a release. A missing record costs the
+ * Release asset and nothing else.
+ */
+class DeployProvenance {
+    static ARTIFACT = 'deploy-provenance';
+    static FILE = 'deploy-provenance.json';
+    static async record(rec) {
+        try {
+            const file = path.join(process.cwd(), DeployProvenance.FILE);
+            fs.writeFileSync(file, JSON.stringify(rec));
+            // 1 day: it is only ever read by the release job of the same run.
+            await (await stageTransfer()).saveByPaths(DeployProvenance.ARTIFACT, [file], 1);
+            fs.rmSync(file, { force: true });
+        }
+        catch (err) {
+            core.warning(`Deploy provenance not recorded — ${err.message}`);
+        }
+    }
+    static async read() {
+        try {
+            await (await stageTransfer()).restoreByName(DeployProvenance.ARTIFACT);
+            const file = path.join(process.cwd(), DeployProvenance.FILE);
+            if (!fs.existsSync(file))
+                return undefined;
+            return JSON.parse(fs.readFileSync(file, 'utf8'));
+        }
+        catch {
+            return undefined;
+        }
+    }
+}
+exports.DeployProvenance = DeployProvenance;
+//# sourceMappingURL=DeployProvenance.js.map
 
 /***/ }),
 
@@ -9506,6 +9728,105 @@ class StageTransfer {
 }
 exports.StageTransfer = StageTransfer;
 //# sourceMappingURL=StageTransfer.js.map
+
+/***/ }),
+
+/***/ 97428:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.StaticReleaseInjector = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const StageName_1 = __nccwpck_require__(90969);
+const ActionsType_1 = __nccwpck_require__(15515);
+/**
+ * Adds `release` to the parsed config for static frontends, so a prod deploy leaves a
+ * git tag + GitHub Release without every frontend repo having to edit its action.yaml.
+ * Same idea as QualityStageInjector, and it lives next to it on the shared load path
+ * in index.ts for the same reason: the config job and the stage job parse action.yaml
+ * independently, so injecting only into the flags would enable the Release job and
+ * then kill it with "Stage 'release' not found in action.yaml".
+ *
+ * Why this is the library's call and not the repo's: a backend that reaches prod gets
+ * a permanent stable-sha-xxx ECR tag, and can be traced back to a commit forever. A
+ * frontend had nothing equivalent — the Actions artifact expires after 90 days and the
+ * S3 bucket is overwritten by the next deploy, so past that window there was no copy
+ * of what production was serving and no way to roll back to it. The Release, with the
+ * dist bundle attached (see AppRelease.attachDistBundle), IS the frontend's stable-sha.
+ *
+ * That two repos never declared the stage was an omission, not a decision — which is
+ * exactly the kind of gap that belongs in the platform rather than in a checklist.
+ *
+ * A repo that declares `release` itself always wins: this only fills the gap.
+ */
+class StaticReleaseInjector {
+    static inject(config, branchType, workflow) {
+        if (config.type !== ActionsType_1.ActionsType.APP)
+            return;
+        if (config.stages.some(s => s.name === StageName_1.StageName.RELEASE))
+            return; // repo declared it
+        // Static frontend = deploys a dist to S3 and never publishes an image. The second
+        // half matters: a repo that declares BOTH publish and s3_deploy is promoting an
+        // image somewhere, and AppRelease would then try to move ECR tags for a release
+        // nobody asked for. Only the unambiguous case is injected.
+        const isStatic = config.stages.some(s => s.name === StageName_1.StageName.S3_DEPLOY)
+            && !config.stages.some(s => s.name === StageName_1.StageName.PUBLISH);
+        if (!isStatic)
+            return;
+        // The slot list is authoritative, and it is branch-aware: FEATURE_STAGES has no
+        // release slot, so a feature-branch dev deploy must not tag anything. Injecting
+        // there would be dead weight at best (OutputWriter leaves the flag false) and, on
+        // GenericWorkflow, would actually run.
+        const hasSlot = workflow.imposesNoRestrictions()
+            || workflow.stagesConfig(branchType).some(s => s.name === StageName_1.StageName.RELEASE);
+        if (!hasSlot)
+            return;
+        // Order is not cosmetic: Workflow.checkOrder throws INVALID_STAGE_ORDER unless the
+        // declared stages follow the slot sequence, and release sits before s3_deploy in
+        // PROMOTE_STAGES. (Execution order is the CD workflow's business — its release job
+        // `needs` the deploy jobs, so the tag still reflects a deploy that succeeded.)
+        const at = config.stages.findIndex(s => s.name === StageName_1.StageName.S3_DEPLOY);
+        config.stages.splice(at, 0, { name: StageName_1.StageName.RELEASE });
+        core.info('[release] release stage injected — static frontend with no publish.docker');
+    }
+}
+exports.StaticReleaseInjector = StaticReleaseInjector;
+//# sourceMappingURL=StaticReleaseInjector.js.map
 
 /***/ }),
 
