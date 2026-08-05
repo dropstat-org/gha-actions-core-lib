@@ -2976,7 +2976,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             core.info(`Assuming ECS deploy role: ${deployRole} (source: ${deployYaml.deploy_role ? 'deploy.yaml' : 'ECS_DEPLOY_ROLE env var'})`);
             await this.assumeRole(deployRole, `ecs-${effectiveEnv}-${Date.now()}`);
         }
-        core.info(`\n🚀 ECS Deploy → ${effectiveEnv.toUpperCase()}${effectiveEnv !== env ? ` (manual dispatch from ${this.branchType})` : ''}`);
+        core.info(`\nECS Deploy → ${effectiveEnv.toUpperCase()}${effectiveEnv !== env ? ` (manual dispatch from ${this.branchType})` : ''}`);
         core.info(`   cluster:   ${cluster}`);
         core.info(`   service:   ${service}`);
         core.info(`   image tag: :${imageTag}`);
@@ -3090,6 +3090,11 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             core.info('✅ Deploy initiated (stability check skipped)');
         }
         // ── 6. Deploy summary — exact image + targets (job summary + colored log) ──
+        // Derived from the image tag, not from shaOfCommit: on a manual dispatch that
+        // one is empty because the operator named the tag directly - and that is
+        // precisely the case with no other way to tell where the image came from, so
+        // it is the case this must cover.
+        const builtSHA = imageTag.match(/^sha-([0-9a-f]{7,40})$/)?.[1];
         await DeploySummary_1.DeploySummary.write({
             kind: 'ECS',
             environment: effectiveEnv,
@@ -3098,6 +3103,7 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             trigger: isManualDispatch ? 'manual' : 'auto',
             actor: process.env.GITHUB_ACTOR,
             commit: process.env.GITHUB_SHA,
+            provenance: builtSHA ? (0, ImageSHA_1.readBuildProvenance)(builtSHA) ?? undefined : undefined,
         });
     }
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -3568,7 +3574,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             core.info(`Assuming S3 deploy role: ${deployRole} (source: ${dy.deploy_role ? 'deploy.yaml' : 'action.yaml'})`);
             await this.assumeRole(deployRole, `s3-${effectiveEnv}-${Date.now()}`);
         }
-        core.info(`\n🚀 S3 Deploy → ${effectiveEnv.toUpperCase()}`);
+        core.info(`\nS3 Deploy → ${effectiveEnv.toUpperCase()}`);
         core.info(`   bucket:        s3://${bucket}/`);
         core.info(`   distribution:  ${distribution ?? '(none — skipping invalidation)'}`);
         core.info(`   dist:          ${distPath} (artifact: ${artifact})`);
@@ -3578,7 +3584,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // Empty/unset → auto-pick the latest successful CI run with the artifact.
         const runIdRaw = process.env.DEPLOY_ARTIFACT_RUN_ID?.trim();
         const runIdOverride = runIdRaw && /^\d+$/.test(runIdRaw) ? Number(runIdRaw) : undefined;
-        const { fromRun, shortSha } = await this.downloadDist(artifact, distPath, runIdOverride);
+        const { fromRun, shortSha, provenance } = await this.downloadDist(artifact, distPath, runIdOverride);
         // Resolve the real content root: the artifact may carry a top-level dir (e.g. a
         // CRA artifact uploaded with `path: build/` zips as `build/index.html`), which —
         // unzipped into distPath — nests as `build/build/index.html`. Syncing distPath
@@ -3706,6 +3712,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             trigger: isManualDispatch ? 'manual' : 'auto',
             actor: process.env.GITHUB_ACTOR,
             commit: shortSha || process.env.GITHUB_SHA,
+            provenance,
         });
     }
     /**
@@ -3743,6 +3750,12 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         let archiveUrl = '';
         let fromRun = 0;
         let headSha = '';
+        // Where the artifact came from. The docker side records this on the build tag
+        // (PublishStage.writeBuildTag) because the image outlives every trace of the
+        // run that made it; here the artifact IS a run, and its metadata already
+        // carries the branch and the actor, so it just has to be kept.
+        let headBranch = '';
+        let builtBy = '';
         if (runId) {
             // Explicit run — rollback/redeploy of a specific build.
             const match = (await artifactsOf(runId)).find(a => a.name === artifact);
@@ -3752,8 +3765,12 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
             archiveUrl = match.archive_download_url;
             fromRun = runId;
             const runRes = await fetch(`${api}/actions/runs/${runId}`, { headers });
-            if (runRes.ok)
-                headSha = (await runRes.json()).head_sha ?? '';
+            if (runRes.ok) {
+                const run = (await runRes.json());
+                headSha = run.head_sha ?? '';
+                headBranch = run.head_branch ?? '';
+                builtBy = run.actor?.login ?? '';
+            }
         }
         else {
             // No explicit run_id → resolve the CI run that built THIS commit on THIS branch.
@@ -3796,6 +3813,8 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
                     archiveUrl = match.archive_download_url;
                     fromRun = run.id;
                     headSha = run.head_sha ?? '';
+                    headBranch = run.head_branch ?? '';
+                    builtBy = run.actor?.login ?? '';
                     break;
                 }
             }
@@ -3822,7 +3841,12 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         fs.writeFileSync(zipPath, Buffer.from(await blobRes.arrayBuffer()));
         await exec.exec('unzip', ['-o', '-q', zipPath, '-d', distPath]);
         fs.rmSync(zipPath, { force: true });
-        return { fromRun, shortSha };
+        // Same shape the docker side records on the build tag, so both deploy summaries
+        // read alike. Omitted rather than half-filled when the run metadata is missing.
+        const provenance = headBranch
+            ? `branch=${headBranch} run=${fromRun}${builtBy ? ` actor=${builtBy}` : ''}`
+            : undefined;
+        return { fromRun, shortSha, provenance };
     }
     /**
      * Returns the directory that actually holds the site (where index.html lives).
@@ -5265,7 +5289,7 @@ class PublishStage extends AbstractStage_1.AbstractStage {
             // ignoreReturnCode: true so a failed push (e.g. missing contents:write)
             // doesn't fail the publish — but that also means it won't throw, so the
             // exit code must be checked explicitly or a 403 gets logged as success.
-            await exec.exec('git', ['tag', '-f', tagName, fullSHA], { ignoreReturnCode: true });
+            await this.writeBuildTag(tagName, fullSHA);
             const pushExitCode = await exec.exec('git', ['push', 'origin', tagName, '--force'], { ignoreReturnCode: true });
             if (pushExitCode === 0) {
                 core.info(`Tagged ${tagName} -> ${fullSHA} for downstream build-commit resolution`);
@@ -5277,6 +5301,42 @@ class PublishStage extends AbstractStage_1.AbstractStage {
         catch (err) {
             core.warning(`Could not push build marker tag ${tagName}: ${err}`);
         }
+    }
+    /**
+     * Writes the build marker tag, ANNOTATED with where the image came from.
+     *
+     * The tag itself only ever answered "was this commit built". The annotation
+     * answers "by whom, from which branch, under which PR" — the question every
+     * deploy after this one asks and today can only guess at. A manual dispatch
+     * picks `sha-dc2e501` from a list and the run title can never say where it came
+     * from: run-name is evaluated once at run creation with no API access, and
+     * GitHub has no API to rename a run afterwards. So the provenance has to be
+     * recorded at the only moment it is known for certain — here — and read back
+     * later. It also outlives the branch, which is deleted on merge.
+     *
+     * Annotated tags need a committer identity, which the runner does not always
+     * have, so it is passed inline rather than mutating global git config. If the
+     * annotated write fails for any reason the lightweight tag is still written:
+     * losing the annotation costs a nicer summary, losing the tag breaks every
+     * downstream deploy (see ImageSHA.resolveImageSHA).
+     */
+    async writeBuildTag(tagName, fullSHA) {
+        const parts = [
+            `branch=${process.env.GITHUB_REF_NAME ?? 'unknown'}`,
+            `run=${process.env.GITHUB_RUN_ID ?? 'unknown'}`,
+            `actor=${process.env.GITHUB_ACTOR ?? 'unknown'}`,
+        ];
+        const annotateExitCode = await exec.exec('git', [
+            '-c', 'user.name=github-actions[bot]',
+            '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
+            'tag', '-f', '-a', tagName, fullSHA, '-m', parts.join(' '),
+        ], { ignoreReturnCode: true });
+        if (annotateExitCode === 0)
+            return;
+        core.warning(`Could not write annotated build tag ${tagName} (git tag -a exited ${annotateExitCode}) — `
+            + 'falling back to a lightweight tag. Deploys still resolve; only the provenance line in the '
+            + 'deploy summary is lost.');
+        await exec.exec('git', ['tag', '-f', tagName, fullSHA], { ignoreReturnCode: true });
     }
     // Identifies which built artifact corresponds to which commit, for manual
     // deploy reference (Pipeline CD workflow_dispatch with deploy_ref=<tag>).
@@ -6330,11 +6390,16 @@ class DeploySummary {
             e.commit ? `**commit:** \`${e.commit}\`` : '',
         ].filter(Boolean).join(' · ');
         const rows = Object.entries(e.targets).map(([k, v]) => `| <sub>${k}</sub> | <sub>\`${v}\`</sub> |`);
+        // Its own line rather than another item in `meta`: this is the answer to
+        // "where did this image come from", which the run title cannot give (run-name
+        // is fixed at run creation), so it should not be buried mid-sentence.
+        const provenance = e.provenance ? [`<sub>**built from:** ${e.provenance}</sub>`, ''] : [];
         const md = [
-            `## 🚀 Deploy — ${e.kind} → \`${e.environment}\``,
+            `## Deploy — ${e.kind} → \`${e.environment}\``,
             '',
             `<sub>${meta}</sub>`,
             '',
+            ...provenance,
             '| | |',
             '|--|--|',
             ...rows,
@@ -6350,8 +6415,10 @@ class DeploySummary {
             core.warning(`DeploySummary: could not write job summary: ${err.message}`);
         }
         const tgt = Object.entries(e.targets).map(([k, v]) => `${k}=${v}`).join('  ');
-        core.info(`${A.bold}${A.cyan}🚀 Deploy ${e.kind} → ${e.environment}${A.reset}`);
+        core.info(`${A.bold}${A.cyan}Deploy ${e.kind} → ${e.environment}${A.reset}`);
         core.info(`${A.green}   ${e.artifact}${A.reset}${A.dim}  ${tgt}${A.reset}`);
+        if (e.provenance)
+            core.info(`${A.dim}   built from: ${e.provenance}${A.reset}`);
     }
 }
 exports.DeploySummary = DeploySummary;
@@ -6779,6 +6846,7 @@ exports.GitVersionResolver = GitVersionResolver;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.BUILD_TAG_PREFIX = void 0;
 exports.resolveImageSHA = resolveImageSHA;
+exports.readBuildProvenance = readBuildProvenance;
 exports.shortSHA = shortSHA;
 exports.normalizeShaTag = normalizeShaTag;
 const child_process_1 = __nccwpck_require__(35317);
@@ -6853,8 +6921,48 @@ function resolveImageSHA(options = {}) {
         'The commit being deployed was never built, so there is no image to deploy. ' +
         'The usual cause is a commit pushed to the branch after its CI run - the merge ' +
         'then brings in a commit no pipeline ever published.\n' +
+        sourceBranchHint(sha) +
         'Fix: re-run CI on the branch head and merge again, or dispatch the deploy manually ' +
         'with sha_tag set to the image you want.');
+}
+/** Branch prefixes whose pushes run CI and therefore produce an image. */
+const BUILDING_PREFIXES = ['feature/', 'hotfix/', 'release/'];
+/**
+ * Names the branch this merge brought in, and says so out loud when that branch
+ * could never have been built.
+ *
+ * A branch named outside the GitFlow prefixes (`fix/...`, `feat/...`) does not
+ * match the CI trigger, so it never runs, its PR still looks green because app
+ * PRs are a no-op by design, and the first thing that notices is this error -
+ * several jobs and one approval later. That happened on 2026-08-05 with
+ * `fix/ddb-3608/...`, and the root cause took a manual trace through the merge
+ * parents to find. The merge subject already carries the branch name, so the
+ * error can just say it.
+ *
+ * Best-effort by construction: an unparseable subject yields an empty string and
+ * the generic message stands on its own.
+ */
+function sourceBranchHint(mergeSHA) {
+    let subject = '';
+    try {
+        subject = (0, child_process_1.execSync)(`git log -1 --format=%s ${mergeSHA}`, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'ignore'],
+        }).trim();
+    }
+    catch {
+        return '';
+    }
+    const match = subject.match(/^Merge pull request #(\d+) from [^/]+\/(.+)$/);
+    if (!match)
+        return '';
+    const [, pr, branch] = match;
+    if (BUILDING_PREFIXES.some(p => branch.startsWith(p))) {
+        return `This merge (PR #${pr}) brought in branch '${branch}'.\n`;
+    }
+    return (`This merge (PR #${pr}) brought in branch '${branch}', which does not start with ` +
+        `${BUILDING_PREFIXES.map(p => `'${p}'`).join(', ')} - so pushes to it never triggered CI ` +
+        'and no image was ever built. That is almost certainly the cause here, not a late push.\n');
 }
 /**
  * Walks the merged-in side looking for the commit that was actually built.
@@ -6904,6 +7012,34 @@ function getExactBuildTagSHA(sha) {
             stdio: ['pipe', 'pipe', 'ignore'],
         }).trim();
         return taggedSHA || null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Reads the provenance recorded on a commit's `built/sha-*` tag: the branch the
+ * image was built from, the CI run that built it, and who triggered it.
+ *
+ * PublishStage writes this as the tag's annotation (see writeBuildTag). Reading
+ * it back is the only way a deploy can state where its image came from — the
+ * branch is usually deleted by then, and the run title cannot carry the answer
+ * because run-name is evaluated once, at run creation, with no API access.
+ *
+ * Returns null for a lightweight tag (every image built before this shipped, and
+ * any build whose annotated write fell back). Callers must treat the provenance
+ * as decoration, never as a gate.
+ */
+function readBuildProvenance(sha) {
+    try {
+        const tagName = `${exports.BUILD_TAG_PREFIX}${shortSHA(sha)}`;
+        // %(contents:subject) is empty for a lightweight tag, which is exactly the
+        // "no annotation" case — no need to inspect the object type separately.
+        const out = (0, child_process_1.execSync)(`git for-each-ref --format="%(contents:subject)" refs/tags/${tagName}`, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'ignore'],
+        }).trim();
+        return out || null;
     }
     catch {
         return null;
