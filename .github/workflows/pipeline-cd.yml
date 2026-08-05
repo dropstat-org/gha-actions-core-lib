@@ -660,6 +660,9 @@ jobs:
     permissions:
       id-token: write
       contents: write
+      # the release stage downloads the deployed dist bundle from the CI run that
+      # produced it, and the artifacts API 403s without this
+      actions: read
     steps:
       - uses: actions/checkout@v4.2.2
         with:
