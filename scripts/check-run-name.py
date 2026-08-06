@@ -58,7 +58,15 @@ def paren_call(text: str, call_idx: int) -> str:
 
 
 def check_no_long_sha(block: str, path: Path) -> int:
-    """Invariant that applies to EVERY caller run-name, CI and CD alike.
+    """Advisory that applies to EVERY caller run-name, CI and CD alike.
+
+    Warns, never fails - the one rule in this script that does not. It costs
+    readability of a run title, not correctness of a deploy, and the fix has to be
+    hand-applied in every caller because GitHub only evaluates run-name from the
+    caller's own file. Failing would block merges in repos where nothing is
+    actually broken, and the whole point of centralising governance is to stop
+    handing every repo a one-line chore. The branch rule below stays hard: that
+    one guards a failure mode with no logs.
 
     GitHub expressions have no substring/slice, so anything interpolated here is
     shown at full length. `github.sha` (and `github.event.workflow_run.head_sha`)
@@ -74,7 +82,9 @@ def check_no_long_sha(block: str, path: Path) -> int:
     m = re.search(r"github\.sha|head_sha", block)
     if not m:
         return 0
-    print(f"FAIL: {path}'s run-name interpolates `{m.group(0)}` - a full 40-char sha.")
+    # ::warning:: so it surfaces as an annotation on the run rather than only in
+    # the log, which is the whole reason a non-blocking check is still worth having.
+    print(f"::warning::{path}'s run-name interpolates `{m.group(0)}` - a full 40-char sha.")
     print(
         "  Why it matters: run-name cannot truncate (no substring function in "
         "GitHub expressions), so the whole sha lands in the run title and pushes "
@@ -84,7 +94,7 @@ def check_no_long_sha(block: str, path: Path) -> int:
         "`github.event.head_commit.message` (CI). See "
         "docs/templates/run-name-cd.yml for the canonical pattern."
     )
-    return 1
+    return 0
 
 
 def check_cd(text: str) -> int:
@@ -171,8 +181,8 @@ def main() -> int:
     if failed:
         return 1
     if checked:
-        print("OK: run-name blocks carry the source branch where it is required "
-              "and no full-length sha.")
+        print("OK: run-name blocks carry the source branch where it is required. "
+              "Any full-length sha is reported above as a warning, not a failure.")
     return 0
 
 
