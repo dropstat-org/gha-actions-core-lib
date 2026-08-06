@@ -4050,6 +4050,7 @@ const ErrorCode_1 = __nccwpck_require__(9727);
 const StageName_1 = __nccwpck_require__(90969);
 const ActionsType_1 = __nccwpck_require__(15515);
 const Env_1 = __nccwpck_require__(45188);
+const ReleaseCut_1 = __nccwpck_require__(69272);
 const ImageSHA_1 = __nccwpck_require__(2870);
 /** Environment a pushed branch deploys to, or null when it deploys nowhere. */
 function environmentFor(ref) {
@@ -4082,15 +4083,21 @@ function environmentFor(ref) {
  * (resolveImageSHA -> the merge's second parent, or the built/ tag). Naming the sha
  * from CI overrode that resolution with a commit that has no image.
  *
- * `isCreation` covers the one case where a release/** push does NOT build: cutting
- * the branch. That commit is develop's tip, inherited rather than authored, and what
- * it means is "stabilise what qa has" - so it promotes the image qa validated instead
- * of compiling the same source into a second, different binary. Every later push to
- * the release branch is an authored fix and builds normally.
+ * `isCleanCut` covers the one case where a release/** push does NOT build: cutting
+ * the branch off develop unchanged. That commit is develop's tip, inherited rather
+ * than authored, and what it means is "stabilise what qa has" - so it promotes the
+ * image qa validated instead of compiling the same source into a second, different
+ * binary. Every later push to the release branch is an authored fix and builds
+ * normally.
+ *
+ * A cut is only clean if the tip is actually inherited, which is not the same as the
+ * ref being new - see ReleaseCut.isCleanCut. Passing "the branch was created here"
+ * instead skips the build for a cut that carries authored commits, and the CD is then
+ * asked to promote something nothing ever built.
  */
-function buildsItsOwnImage(ref, isCreation = false) {
+function buildsItsOwnImage(ref, isCleanCut = false) {
     const branch = ref.replace(/^refs\/heads\//, '');
-    if (isCreation && branch.startsWith('release/'))
+    if (isCleanCut && branch.startsWith('release/'))
         return false;
     return branch.startsWith('feature/')
         || branch.startsWith('hotfix/')
@@ -4136,7 +4143,7 @@ class TriggerCdStage {
         // commit has no image of its own, so the tag is left empty and the CD resolves the
         // image it is promoting - the same path a push-driven CD always took. Sending
         // `sha-<merge commit>` there just makes the deploy fail with ECR_IMAGE_NOT_FOUND.
-        const buildsOwn = buildsItsOwnImage(ref, Env_1.Env.isBranchCreation());
+        const buildsOwn = buildsItsOwnImage(ref, await ReleaseCut_1.ReleaseCut.isCleanCut());
         const inputs = {
             // Short form on purpose: `sha-<7>` is what PublishStage actually tags in ECR
             // (shortSHA / normalizeShaTag), and it is also what the CD caller's run-name
@@ -7592,7 +7599,7 @@ const StageName_1 = __nccwpck_require__(90969);
 const BranchType_1 = __nccwpck_require__(22302);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
-const Env_1 = __nccwpck_require__(45188);
+const ReleaseCut_1 = __nccwpck_require__(69272);
 const STAGE_FLAGS = [
     { output: 'compile_enabled', stageName: StageName_1.StageName.COMPILE },
     { output: 'unit_test_enabled', stageName: StageName_1.StageName.UNIT_TEST },
@@ -7680,8 +7687,10 @@ class OutputWriter {
         // and the CD then has to choose between two images of the same code. So the cut
         // drops the build half and only routes - the same shape develop and main already
         // have. Authored commits pushed to the release branch afterwards are not
-        // creations, so they keep compiling normally (see buildsItsOwnImage).
-        if (phase === 'ci' && branchType === BranchType_1.BranchType.RELEASE && Env_1.Env.isBranchCreation()) {
+        // creations, so they keep compiling normally (see buildsItsOwnImage). A cut that
+        // carries authored commits is not a clean cut and keeps its build - there is
+        // nothing to promote, since no other branch ever built that commit.
+        if (phase === 'ci' && branchType === BranchType_1.BranchType.RELEASE && await ReleaseCut_1.ReleaseCut.isCleanCut()) {
             for (const stage of [StageName_1.StageName.COMPILE, StageName_1.StageName.PUBLISH, StageName_1.StageName.TRIVY]) {
                 allowedSlots.delete(stage);
             }
@@ -8914,6 +8923,116 @@ class QualityStageInjector {
 }
 exports.QualityStageInjector = QualityStageInjector;
 //# sourceMappingURL=QualityStageInjector.js.map
+
+/***/ }),
+
+/***/ 69272:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ReleaseCut = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const github_1 = __nccwpck_require__(93228);
+const Credentials_1 = __nccwpck_require__(18753);
+const Env_1 = __nccwpck_require__(45188);
+/**
+ * Whether a `release/**` branch was cut clean - carrying over a commit that was
+ * built somewhere else - or cut carrying commits of its own.
+ *
+ * The distinction decides whether the push compiles. A clean cut promotes the
+ * image qa already validated rather than turning the exact same source into a
+ * second, different binary. A cut that carries authored commits has nothing to
+ * promote: that code was never built anywhere.
+ *
+ * Reading `created: true` off the push payload is not enough to tell them apart.
+ * It says the ref is new, not that its tip is inherited, and those come apart the
+ * moment someone commits before pushing the new branch - which is the ordinary
+ * way to work, not a mistake. When that happened on
+ * `release/bug-fixForDDB-3749-rajesh` the push skipped Compile, and the failure
+ * only surfaced later in Trigger CD, as a request to deploy an artifact that no
+ * run had ever produced.
+ */
+class ReleaseCut {
+    /**
+     * True when this push created the branch AND its tip is inherited.
+     *
+     * "Inherited" is decided by asking which branches have this commit as their
+     * head. A clean cut leaves the tip as the head of the branch it came from too
+     * (develop, normally); an authored commit is the head of the new branch alone.
+     *
+     * Falls back to true - the behaviour before this check existed - when the
+     * question cannot be answered. Guessing "clean" costs a rerun of a failure that
+     * already existed; guessing "authored" would silently build a second binary
+     * from source that qa had already signed off on, which is the thing build-once
+     * is there to prevent.
+     */
+    static async isCleanCut() {
+        if (!Env_1.Env.isBranchCreation())
+            return false;
+        // Credentials.ghToken accepts either name on purpose: the Config job of
+        // pipeline-ci.yml passes GH_TOKEN while every other stage passes GITHUB_TOKEN,
+        // and the Compile-skip half of this check runs precisely in that job.
+        const token = Credentials_1.Credentials.ghToken();
+        if (!token) {
+            core.warning('No GitHub token available to check whether this release cut carries its own ' +
+                'commits - treating it as a clean cut.');
+            return true;
+        }
+        const [owner, repo] = Env_1.Env.repository().split('/');
+        try {
+            const { data } = await (0, github_1.getOctokit)(token).request('GET /repos/{owner}/{repo}/commits/{commit_sha}/branches-where-head', { owner, repo, commit_sha: Env_1.Env.sha() });
+            const branch = Env_1.Env.refName();
+            const inherited = data.some(b => b.name !== branch);
+            if (!inherited) {
+                core.info(`${branch} was cut with commits of its own - building them instead of ` +
+                    'promoting, since no other branch ever built this commit.');
+            }
+            return inherited;
+        }
+        catch (err) {
+            core.warning(`Could not determine whether ${Env_1.Env.refName()} carries its own commits ` +
+                `(${err instanceof Error ? err.message : String(err)}) - treating it as a clean cut.`);
+            return true;
+        }
+    }
+}
+exports.ReleaseCut = ReleaseCut;
+//# sourceMappingURL=ReleaseCut.js.map
 
 /***/ }),
 
