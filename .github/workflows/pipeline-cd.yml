@@ -681,12 +681,29 @@ jobs:
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+      # After a release from master the library opens the main -> develop back-merge
+      # PR, and GITHUB_TOKEN cannot do that: callers grant pull-requests:read, and
+      # raising it here is not an option — GitHub validates every `permissions:` a
+      # reusable declares at STARTUP, so one new entry kills every caller at once
+      # with startup_failure (confirmed live, run 31137007231). An App installation
+      # token bypasses the caller's grant entirely. continue-on-error because a repo
+      # without the App installed must degrade to a warning, never fail a shipped
+      # release.
+      - name: Generate app token (back-merge PR)
+        id: backmerge-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CD_APPROVAL_APP_ID }}
+          private-key: ${{ secrets.CD_APPROVAL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
       - uses: dropstat-org/gha-actions-core-lib@main
         with:
           stage: release
         env:
           PIPELINE_REF: ${{ needs.config.outputs.resolved_ref || inputs.deploy_ref }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BACKMERGE_TOKEN: ${{ steps.backmerge-token.outputs.token }}
           SHA_TAG: ${{ inputs.sha_tag }}
           # The environment the deploy jobs actually targeted - the same value passed to
           # ecs_deploy/s3_deploy. Without it AppRelease re-derived the environment from
