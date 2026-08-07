@@ -4844,11 +4844,32 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AbstractReleaseStage = void 0;
 const AbstractBranchStage_1 = __nccwpck_require__(64843);
 const ArchiveManager_1 = __nccwpck_require__(62771);
+const BranchType_1 = __nccwpck_require__(22302);
+const BackMerge_1 = __nccwpck_require__(84370);
 class AbstractReleaseStage extends AbstractBranchStage_1.AbstractBranchStage {
     archive;
     constructor(config, branchType) {
         super(config, branchType);
         this.archive = new ArchiveManager_1.ArchiveManager();
+    }
+    /**
+     * Every release variant back-merges into develop when it releases from master.
+     *
+     * It lives here rather than in AppRelease so that MasterTagRelease (terraform) and
+     * anything added later inherit it without being asked to remember: GitFlow's
+     * back-merge rule is about the branching model, not about what kind of artifact the
+     * repo ships. Subclasses override onMaster, so hooking the release itself would have
+     * needed each one to call up - which is precisely the per-repo chore this platform
+     * exists to remove.
+     *
+     * It runs AFTER the release, and only if the release succeeded: a back-merge PR for
+     * a release that never reached production would ask a reviewer to propagate
+     * something that does not exist.
+     */
+    async run(stage) {
+        await super.run(stage);
+        if (this.branchType === BranchType_1.BranchType.MASTER)
+            await BackMerge_1.BackMerge.openPullRequest();
     }
 }
 exports.AbstractReleaseStage = AbstractReleaseStage;
@@ -6413,6 +6434,151 @@ exports.ArtifactHandler = ArtifactHandler;
 
 /***/ }),
 
+/***/ 84370:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.BackMerge = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const github_1 = __nccwpck_require__(93228);
+const Credentials_1 = __nccwpck_require__(18753);
+const Env_1 = __nccwpck_require__(45188);
+/**
+ * Opens the PR that carries `main` back into `develop` after a production release.
+ *
+ * GitFlow states this twice - a release branch must merge back into develop, and so
+ * must a hotfix - and it is the only rule in the model stated twice. The reason is
+ * not tidiness: when main runs ahead of develop, the next release is cut from a
+ * develop that never received the fix, and ships production a regression of a bug it
+ * already had fixed. Nothing fails, nothing warns; the bug simply comes back.
+ *
+ * Until now this was a line on a checklist ("back-merge main into develop after the
+ * prod deploy"), which is the same as saying it happens when someone remembers.
+ *
+ * A PR is opened rather than the merge being pushed, deliberately:
+ *
+ *   - the merge can genuinely conflict, and resolving a conflict unattended in a
+ *     release job is how you get a bad resolution nobody reviews;
+ *   - most of this org's repos merge by squash, which discards the merge base, so
+ *     conflicts here are the normal case rather than the exception - which is also
+ *     why this runs immediately after the release, while the divergence is one
+ *     commit wide instead of a sprint wide;
+ *   - `develop` is a protected branch, and a pipeline that pushes straight to it
+ *     would be a bypass of exactly the review this platform exists to enforce.
+ *
+ * Every failure here is a warning, never an error. The release already succeeded and
+ * production is already serving the new build; failing the job afterwards would
+ * report a green deploy as red and teach people to ignore the badge.
+ */
+class BackMerge {
+    /** Where production history lives, and where it has to be replayed to. */
+    static TARGET = 'develop';
+    static async openPullRequest() {
+        const token = Credentials_1.Credentials.backMergeToken();
+        if (!token) {
+            core.warning('Skipping the develop back-merge: no GitHub token available. Merge main into ' +
+                'develop by hand, or develop will be missing this release.');
+            return;
+        }
+        const { owner, name: repo } = Env_1.Env.repositoryParts();
+        const head = Env_1.Env.refName() || 'main';
+        const api = (0, github_1.getOctokit)(token);
+        try {
+            // Trunk-based and single-branch repos have no develop, and this is a
+            // no-op there rather than a misconfiguration to complain about. Only a 404
+            // means that, though: swallowing every error here would report a token
+            // without repo access as "this repo doesn't use develop" and skip the
+            // back-merge silently in exactly the repos that need it.
+            try {
+                await api.request('GET /repos/{owner}/{repo}/branches/{branch}', {
+                    owner, repo, branch: this.TARGET,
+                });
+            }
+            catch (err) {
+                if (err.status !== 404)
+                    throw err;
+                core.info(`No '${this.TARGET}' branch in this repo - nothing to back-merge.`);
+                return;
+            }
+            // `compare` is asked in the direction develop...main: ahead_by counts the
+            // commits main has that develop does not, which is precisely what the
+            // back-merge would carry. Zero means develop already has this release -
+            // the ordinary case when the release was cut clean and merged forward.
+            const { data: cmp } = await api.request('GET /repos/{owner}/{repo}/compare/{basehead}', { owner, repo, basehead: `${this.TARGET}...${head}` });
+            if (!cmp.ahead_by) {
+                core.info(`'${this.TARGET}' already contains everything in '${head}' - no back-merge needed.`);
+                return;
+            }
+            // Reopening an identical PR on every release turns the notification into
+            // noise, and noise is how the important one gets closed unread.
+            const { data: open } = await api.request('GET /repos/{owner}/{repo}/pulls', {
+                owner, repo, base: this.TARGET, head: `${owner}:${head}`, state: 'open',
+            });
+            if (open.length) {
+                core.notice(`The back-merge PR into '${this.TARGET}' is already open and now covers this ` +
+                    `release too: ${open[0].html_url}`);
+                return;
+            }
+            const { data: pr } = await api.request('POST /repos/{owner}/{repo}/pulls', {
+                owner, repo, base: this.TARGET, head,
+                title: `Back-merge ${head} into ${this.TARGET}`,
+                body: `This release put ${cmp.ahead_by} commit(s) on \`${head}\` that \`${this.TARGET}\` ` +
+                    `does not have.\n\nUntil this merges, the next release is cut from a \`${this.TARGET}\` ` +
+                    `that never received them - which ships production a regression of a bug it had ` +
+                    `already fixed. Opened automatically by the release stage; merge it, do not close it.` +
+                    `\n\nIf it conflicts, resolve in favour of \`${head}\` for anything this release ` +
+                    `changed - that is what production is running right now.`,
+            });
+            core.notice(`Opened the back-merge PR into '${this.TARGET}': ${pr.html_url}`);
+        }
+        catch (err) {
+            // Deliberately not fatal: see the class doc. The release shipped.
+            core.warning(`Could not open the back-merge PR into '${this.TARGET}' ` +
+                `(${err instanceof Error ? err.message : String(err)}). Production is fine - but ` +
+                `merge '${head}' into '${this.TARGET}' by hand before the next release is cut.`);
+        }
+    }
+}
+exports.BackMerge = BackMerge;
+//# sourceMappingURL=BackMerge.js.map
+
+/***/ }),
+
 /***/ 90609:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -6597,6 +6763,20 @@ class Credentials {
     static sonarToken() { return this.optional('SONAR_TOKEN'); }
     static ghToken() {
         return this.optional('GH_TOKEN') || this.optional('GITHUB_TOKEN');
+    }
+    /**
+     * Token for actions that need write access GITHUB_TOKEN does not have.
+     *
+     * GITHUB_TOKEN can only ever hold the permissions the CALLING repo grants, and
+     * raising them in the reusable workflow is not an option: GitHub validates every
+     * `permissions:` a reusable declares at startup, so one new entry kills every
+     * caller at once with `startup_failure`. The way out is a token that does not go
+     * through the caller's grant at all - a GitHub App installation token minted
+     * inside the reusable - falling back to GITHUB_TOKEN where the App is not
+     * installed, so repos without it degrade to a warning instead of an error.
+     */
+    static backMergeToken() {
+        return this.optional('BACKMERGE_TOKEN') || this.ghToken();
     }
     static awsAccessKeyId() { return this.optional('AWS_ACCESS_KEY_ID'); }
     static awsSecretAccessKey() { return this.optional('AWS_SECRET_ACCESS_KEY'); }
