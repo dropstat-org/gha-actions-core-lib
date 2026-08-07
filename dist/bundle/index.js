@@ -824,6 +824,8 @@ var ErrorCode;
     ErrorCode["SONARQUBE_QUALITY_GATE_FAILED"] = "SONARQUBE_QUALITY_GATE_FAILED";
     ErrorCode["TRIVY_VULNERABILITIES_FOUND"] = "TRIVY_VULNERABILITIES_FOUND";
     ErrorCode["CHECKOV_POLICY_FAILED"] = "CHECKOV_POLICY_FAILED";
+    // Upstream (GitHub API) availability
+    ErrorCode["UPSTREAM_UNAVAILABLE"] = "UPSTREAM_UNAVAILABLE";
     // Generic
     ErrorCode["EXECUTION_FAILED"] = "EXECUTION_FAILED";
 })(ErrorCode || (exports.ErrorCode = ErrorCode = {}));
@@ -4274,10 +4276,96 @@ class TriggerCdStage {
                         `is 'sha_tag' or 'environment'. Declare both in this repo's pipeline-cd.yml.`;
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Pipeline CD refused the dispatch (HTTP 422): ${body}\n${hint}`);
         }
+        // Anything left that is retryable got its retries above and still failed, so it is
+        // GitHub being unavailable - not this repo. Saying MISSING_STAGE_COMMANDS here sent
+        // a reader looking for a broken input on a day the API was simply down.
+        if (this.retryable(res.status, body)) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.UPSTREAM_UNAVAILABLE, `Dispatching Pipeline CD kept failing with HTTP ${res.status} after ${this.retries} ` +
+                `attempts: ${body}\nNothing is wrong with this repo's pipeline - the GitHub API is ` +
+                `refusing the call. Check https://www.githubstatus.com (Actions) and re-run this job; ` +
+                `the build it would deploy is unaffected.`);
+        }
         throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Dispatching Pipeline CD failed with HTTP ${res.status}: ${body}`);
     }
     static postDispatch(ref, inputs) {
-        return fetch(`${this.api}/repos/${Env_1.Env.repository()}/actions/workflows/pipeline-cd.yml/dispatches`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ ref, inputs }) });
+        return this.request(`/repos/${Env_1.Env.repository()}/actions/workflows/pipeline-cd.yml/dispatches`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ ref, inputs }) });
+    }
+    /** Attempts per call, and the base for the exponential backoff between them. */
+    static retries = 4;
+    static retryBaseMs = 2000;
+    /**
+     * Statuses worth trying again. 5xx is GitHub failing, not this repo; 429 and 403
+     * are how the API says "slow down" (403 carries a rate-limit body, which is why the
+     * body is checked rather than the status alone - a plain 403 is a real permissions
+     * problem and must surface as one).
+     */
+    static retryable(status, body) {
+        if (status >= 500)
+            return true;
+        if (status === 429)
+            return true;
+        return status === 403 && /rate limit|abuse|secondary/i.test(body);
+    }
+    /**
+     * Every call this stage makes to the GitHub API goes through here.
+     *
+     * A pipeline that dies because the API blinked is a pipeline that reports someone
+     * else's outage as this repo's misconfiguration. On 2026-08-06, with Actions in
+     * `major_outage`, dropstat-new-backend's run failed with
+     * `[MISSING_STAGE_COMMANDS] Dispatching Pipeline CD failed with HTTP 500` - a label
+     * that says "you sent the wrong inputs" about a platform that was simply down, and
+     * a single attempt where a retry a few seconds later would have gone through.
+     *
+     * Network-level failures (fetch itself throwing: DNS, reset connections) are retried
+     * the same way. The final failure is raised by the caller, which knows whether the
+     * status is transient - this helper only decides how many times to ask.
+     */
+    static async request(path, init) {
+        let last;
+        for (let attempt = 1; attempt <= this.retries; attempt++) {
+            let res;
+            try {
+                res = await fetch(`${this.api}${path}`, init);
+            }
+            catch (err) {
+                // No Response to hand back on the last attempt, so re-throw under the code
+                // that names the cause: the network, not this repo's pipeline.
+                if (attempt === this.retries) {
+                    throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.UPSTREAM_UNAVAILABLE, `${path} could not be reached after ${this.retries} attempts ` +
+                        `(${err instanceof Error ? err.message : String(err)}). This is a network or ` +
+                        `GitHub API failure, not a problem with this repo - check ` +
+                        `https://www.githubstatus.com and re-run.`);
+                }
+                core.warning(`${path} failed to connect (attempt ${attempt}/${this.retries}) - retrying.`);
+                await this.sleep(this.retryBaseMs * 2 ** (attempt - 1));
+                continue;
+            }
+            if (res.ok || res.status === 204)
+                return res;
+            // The body is read here to classify the failure, and a body can only be consumed
+            // once - so what goes back to the caller is a replay of it rather than the spent
+            // Response. Hand-rolled instead of `new Response`, which needs an undici global
+            // that is not there under every runtime this bundle runs in.
+            const body = await res.text();
+            last = {
+                ok: false,
+                status: res.status,
+                statusText: res.statusText,
+                text: async () => body,
+                json: async () => JSON.parse(body),
+                clone() { return this; },
+            };
+            if (!this.retryable(res.status, body) || attempt === this.retries)
+                return last;
+            const wait = this.retryBaseMs * 2 ** (attempt - 1);
+            core.warning(`${path} returned HTTP ${res.status} (attempt ${attempt}/${this.retries}) - ` +
+                `retrying in ${wait}ms. GitHub is failing this call, not this repo.`);
+            await this.sleep(wait);
+        }
+        return last;
+    }
+    static sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
     /** Not hardcoded to 'main': this org still has repos whose default branch is 'master'. */
     static async defaultBranch() {
@@ -4301,8 +4389,15 @@ class TriggerCdStage {
         };
     }
     static async get(path, explain) {
-        const res = await fetch(`${this.api}${path}`, { headers: this.headers() });
+        const res = await this.request(path, { headers: this.headers() });
         if (!res.ok) {
+            // Same split as the dispatch: a 5xx that survived the retries is an outage, and
+            // calling it "cannot resolve which build to deploy" would be a lie about a build
+            // that resolves fine the moment the API answers again.
+            if (this.retryable(res.status, await res.clone().text())) {
+                throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.UPSTREAM_UNAVAILABLE, `GET ${path} kept failing with HTTP ${res.status} after ${this.retries} attempts. ` +
+                    `The GitHub API is unavailable - check https://www.githubstatus.com and re-run.`);
+            }
             const detail = explain?.(res.status);
             throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, detail
                 ? `Cannot resolve which build to deploy: ${detail} Meanwhile, deploy manually with an ` +
