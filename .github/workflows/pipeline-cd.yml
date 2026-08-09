@@ -85,6 +85,12 @@ jobs:
       # push/workflow_run → branch derivation. Covers workflow_call (deploy_environment)
       # and the reusable's own dispatch (environment).
       DEPLOY_ENVIRONMENT_OVERRIDE: ${{ inputs.deploy_environment || inputs.environment }}
+      # Lets the config stage read the target environment's deployment-branch policy
+      # (EnvironmentBranchPolicy) and reject a dispatch from a disallowed branch here,
+      # with the allowed patterns spelled out - instead of GitHub killing the deploy
+      # job later with an error that does not say what IS allowed. This job has no
+      # `environment:` of its own, so it is not itself subject to the rule.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       plan_enabled:        ${{ steps.cfg.outputs.plan_enabled }}
       checkov_tf_enabled:  ${{ steps.cfg.outputs.checkov_tf_enabled }}
