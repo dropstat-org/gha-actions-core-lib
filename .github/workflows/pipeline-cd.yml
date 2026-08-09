@@ -74,6 +74,12 @@ on:
 jobs:
   config:
     name: Config
+    # Every downstream job gates on `needs.config.result == 'success'`, not just on
+    # the *_enabled outputs. An output written before config fails still reaches the
+    # dependents, so without that gate a failed config (e.g. the environment
+    # branch-policy pre-check) let the deploy jobs start anyway and sit queued until
+    # GitHub rejected them - the exact late, contextless failure the check exists to
+    # replace.
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 60
     env:
@@ -177,6 +183,7 @@ jobs:
     needs: [config, plan]
     if: |
       always() &&
+      needs.config.result == 'success' &&
       needs.config.outputs.checkov_tf_enabled == 'true' &&
       needs.plan.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
@@ -198,6 +205,7 @@ jobs:
     needs: [config, plan]
     if: |
       always() &&
+      needs.config.result == 'success' &&
       needs.config.outputs.pre_deploy_enabled == 'true' &&
       needs.plan.result != 'failure'
     runs-on: ${{ fromJSON(inputs.runner) }}
@@ -234,6 +242,7 @@ jobs:
     needs: [config, plan, pre_deploy]
     if: |
       always() &&
+      needs.config.result == 'success' &&
       needs.config.outputs.deploy_enabled == 'true' &&
       needs.config.outputs.ActionsCoreLib_type == 'terraform' &&
       needs.plan.result != 'failure' &&
@@ -462,6 +471,7 @@ jobs:
     timeout-minutes: 60
     if: |
       always() &&
+      needs.config.result == 'success' &&
       needs.config.outputs.deploy_enabled == 'true' &&
       needs.pre_deploy.result != 'failure' &&
       (needs.plan.result == 'success' || needs.plan.result == 'skipped') &&
@@ -517,6 +527,7 @@ jobs:
     needs: [config, approval_app]
     if: |
       always() &&
+      needs.config.result == 'success' &&
       needs.config.outputs.ecs_deploy_enabled == 'true' &&
       (needs.approval_app.result == 'success' || needs.approval_app.result == 'skipped')
     runs-on: ${{ fromJSON(inputs.runner) }}
@@ -583,6 +594,7 @@ jobs:
     needs: [config, approval_app]
     if: |
       always() &&
+      needs.config.result == 'success' &&
       needs.config.outputs.s3_deploy_enabled == 'true' &&
       (needs.approval_app.result == 'success' || needs.approval_app.result == 'skipped')
     runs-on: ${{ fromJSON(inputs.runner) }}
@@ -662,6 +674,7 @@ jobs:
     needs: [config, deploy, ecs_deploy, s3_deploy]
     if: |
       always() &&
+      needs.config.result == 'success' &&
       needs.config.outputs.release_enabled == 'true' &&
       (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
       (needs.ecs_deploy.result == 'success' || needs.ecs_deploy.result == 'skipped') &&
@@ -731,6 +744,7 @@ jobs:
     needs: [config, deploy, ecs_deploy, release]
     if: |
       always() &&
+      needs.config.result == 'success' &&
       needs.config.outputs.post_deploy_enabled == 'true' &&
       needs.deploy.result != 'failure' &&
       needs.ecs_deploy.result != 'failure'
