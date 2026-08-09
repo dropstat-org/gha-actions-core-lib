@@ -2787,30 +2787,29 @@ const EXPECTED_ACCOUNT = {
     [Environment_1.Environment.UAT]: '174917982419',
     [Environment_1.Environment.PROD]: '174917982419',
 };
-// Promotion gate: to reach uat/prod (push-driven OR workflow_dispatch), the image
-// must carry ECR tag evidence that the pipeline put it there — not that someone
-// built it on an arbitrary branch and pointed a dispatch at it. Applies to
-// automated deploys too: release/promotion runs AFTER ecs_deploy in the same run,
-// so job ordering does not enforce this; the tag chain is the only real evidence.
+// Promotion gate: to reach prod (push-driven OR workflow_dispatch), the image must
+// carry ECR tag evidence that the pipeline put it there — not that someone built it
+// on an arbitrary branch and pointed a dispatch at it. Applies to automated deploys
+// too: release/promotion runs AFTER ecs_deploy in the same run, so job ordering does
+// not enforce this; the tag chain is the only real evidence.
 //
-// Each environment lists the tags that satisfy it — ANY one is enough.
+// Each environment lists the tags that satisfy it — ANY one is enough. An
+// environment absent from this map is not gated at all.
 //
 //   prod ← :uat only. A strict forward chain, deliberately unchanged: nothing
 //          reaches production without having actually run in uat first.
 //
-//   uat  ← :qa OR release-sha-xxx. This used to be ':qa' alone, which was wrong
-//          for the branch uat exists to serve. A release branch is an independent
-//          line of work: it is cut from develop and then takes its own fix commits,
-//          and such a commit produces a NEW sha that by definition never passed
-//          through qa, so it can never carry :qa. The strict rule therefore blocked
-//          exactly the case it was meant to allow - shipping a release fix to uat -
-//          and the only ways out were to exempt the branch or to weaken the gate to
-//          nothing. release-sha-xxx is the better answer: PublishStage applies it
-//          only when building on a release/* branch, so it is positive proof of
-//          pipeline provenance rather than an exception to the rule. Prod still
-//          demands :uat, so this widens what may enter uat, never what reaches prod.
+//   uat  ← NOT GATED, deliberately. This was ':qa OR release-sha-xxx', and the
+//          successive widenings are the argument against it: ':qa' alone blocked
+//          release fixes (a fix commit produces a new sha that by definition never
+//          passed through qa), so release-sha-xxx was added, and then feature
+//          branches - which must be free to reach dev, qa AND uat for testing -
+//          could not carry either. uat is where things are TRIED; requiring proof
+//          of provenance to enter it inverts what the environment is for, and the
+//          GitHub Environment approval is already the boundary that matters there.
+//          Prod is the only real promotion, and it is unaffected: :uat is applied
+//          by AppRelease only after a uat deploy actually succeeded.
 const PROMOTION_EVIDENCE = {
-    [Environment_1.Environment.UAT]: (shaTag) => ['qa', `release-${shaTag}`],
     [Environment_1.Environment.PROD]: () => ['uat'],
 };
 /**
@@ -2826,16 +2825,15 @@ const PROMOTION_EVIDENCE = {
  * Branch → Environment mapping (automatic, on every push):
  *   feature/* → dev
  *   develop   → qa
- *   release/* → uat (either the image already promoted to qa, or one this branch
- *               built itself — see PROMOTION_EVIDENCE)
+ *   release/* → uat
  *   main      → prod
  *
  * Manual dispatch (workflow_dispatch) may target ANY of dev/qa/uat/prod directly
  * via DEPLOY_ENVIRONMENT_OVERRIDE, regardless of source branch. The GitHub
  * Environment gate (required reviewers on uat/prod) remains the approval
- * boundary; on top of that, uat/prod additionally require that the requested
- * image already carries tag evidence of pipeline provenance (see PROMOTION_EVIDENCE) —
- * you cannot manually ship a develop-only image straight to uat/prod.
+ * boundary; on top of that, prod additionally requires that the requested image
+ * already carries the ':uat' tag (see PROMOTION_EVIDENCE) — you cannot manually
+ * ship a develop-only image straight to production.
  *
  * Security gate: if ecs_deploy.environment = 'prod' and branch is NOT main → error
  * (unless it's a manual dispatch, which is validated by the promotion check instead).
@@ -3070,10 +3068,10 @@ class ECSDeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         if (fullImage) {
             await this.verifyEcrImage(fullImage, region);
         }
-        // ── 2.6. Promotion gate (uat/prod, push AND manual dispatch) ─────────────
-        // Requires the sha-tagged image to already carry the prior stage's ECR tag
-        // (uat needs :qa, prod needs :uat) — proof it went through the real pipeline
-        // instead of being shipped straight from a feature/develop build. Runs on
+        // ── 2.6. Promotion gate (prod, push AND manual dispatch) ─────────────────
+        // Requires the sha-tagged image to already carry ':uat' — proof it went through
+        // the real pipeline instead of being shipped straight from a feature/develop
+        // build. dev/qa/uat are not gated: see PROMOTION_EVIDENCE. Runs on
         // automated push-driven deploys too: job ordering does NOT enforce this
         // (release/promotion runs AFTER ecs_deploy in the same run), so the tag
         // chain is the only reliable evidence of promotion.
@@ -3546,6 +3544,8 @@ const ActionYaml_1 = __nccwpck_require__(9192);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const DeploySummary_1 = __nccwpck_require__(54086);
 const DeployProvenance_1 = __nccwpck_require__(57847);
+const S3PromotionEvidence_1 = __nccwpck_require__(34485);
+const BranchType_1 = __nccwpck_require__(22302);
 /**
  * S3DeployStage — static frontend deploy (S3 sync + CloudFront invalidation).
  *
@@ -3646,6 +3646,25 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const runIdRaw = process.env.DEPLOY_ARTIFACT_RUN_ID?.trim();
         const runIdOverride = runIdRaw && /^\d+$/.test(runIdRaw) ? Number(runIdRaw) : undefined;
         const { fromRun, shortSha, provenance } = await this.downloadDist(artifact, distPath, runIdOverride);
+        // ── Promotion gate (prod only) ─────────────────────────────────────────────
+        // Nothing reaches production without having actually run in uat first. dev, qa
+        // and uat are deliberately NOT gated: a feature branch must be free to reach any
+        // of them, and the GitHub Environment approval is the boundary there. Only the
+        // last hop is a promotion.
+        //
+        // The check is on the ARTIFACT RUN ID, not the branch or the commit: it is the
+        // identity of the build being shipped, so passing the gate means "this exact
+        // bundle ran in uat" rather than "some build of this branch did". Redeploying a
+        // different run_id of the same commit does not inherit the evidence, which is
+        // correct - it is a different bundle.
+        //
+        // Hotfix is the deliberate exception, matching the backend: a hotfix builds its
+        // own bundle and ships straight to prod, which is the entire point of the branch.
+        const skipGate = process.env.DEPLOY_SKIP_PROMOTION_GATE === 'true';
+        const isHotfixToProd = this.branchType === BranchType_1.BranchType.HOTFIX && effectiveEnv === Environment_1.Environment.PROD;
+        if (effectiveEnv === Environment_1.Environment.PROD && !isHotfixToProd && !skipGate) {
+            await S3PromotionEvidence_1.S3PromotionEvidence.verify(fromRun);
+        }
         // Resolve the real content root: the artifact may carry a top-level dir (e.g. a
         // CRA artifact uploaded with `path: build/` zips as `build/index.html`), which —
         // unzipped into distPath — nests as `build/build/index.html`. Syncing distPath
@@ -3781,6 +3800,12 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // fromRun 0 means the dist was already in the workspace (no artifact to point at).
         if (fromRun) {
             await DeployProvenance_1.DeployProvenance.record({ artifactRunId: fromRun, artifact, sha: shortSha || undefined });
+        }
+        // Record the evidence prod will demand later. Placed after the sync and the
+        // invalidation on purpose: it must mean "this build served traffic in uat",
+        // not "a uat deploy was attempted".
+        if (effectiveEnv === Environment_1.Environment.UAT) {
+            await S3PromotionEvidence_1.S3PromotionEvidence.record(fromRun);
         }
     }
     /**
@@ -9308,6 +9333,175 @@ class ReleaseCut {
 }
 exports.ReleaseCut = ReleaseCut;
 //# sourceMappingURL=ReleaseCut.js.map
+
+/***/ }),
+
+/***/ 34485:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.S3PromotionEvidence = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const ActionYaml_1 = __nccwpck_require__(9192);
+const ErrorCode_1 = __nccwpck_require__(9727);
+/**
+ * S3PromotionEvidence — the frontend half of the promotion gate.
+ *
+ * The backend gate reads ECR tags: an image carries `:uat` only because the
+ * pipeline promoted it there, so the tag IS the evidence (see ECSDeployStage
+ * PROMOTION_EVIDENCE). Static frontends have no registry and no image — the unit
+ * of promotion is the CI run that produced the dist artifact, identified by its
+ * run id. So the evidence has to be recorded somewhere, and this records it as a
+ * git tag in the app repo:
+ *
+ *     uat-deployed/<artifactRunId>  ->  the commit that was deployed
+ *
+ * Written after a successful uat deploy, required on entry to prod. Because the
+ * artifact run id is the same number on both deploys, "this exact build already
+ * ran in uat" becomes a single ref lookup.
+ *
+ * Why a git tag and not the Deployments API, which is the obvious home for this:
+ * `deployments: read` is NOT granted by the callers, and adding a permission to
+ * the reusable workflow is validated at STARTUP for every repo that calls it —
+ * one that has not granted it fails with startup_failure before a single job
+ * runs. `contents: write` is already granted everywhere (the release stage tags
+ * and pushes with it), so the tag costs no permission change at all.
+ *
+ * The tags are cheap and self-describing; they are not garbage collected here on
+ * purpose — they are the audit trail of what actually reached uat.
+ */
+class S3PromotionEvidence {
+    static PREFIX = 'uat-deployed';
+    static tagName(runId) {
+        return `${this.PREFIX}/${runId}`;
+    }
+    static api() {
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        const token = process.env.GITHUB_TOKEN ?? '';
+        if (!repo || !token) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `s3_deploy: GITHUB_REPOSITORY and GITHUB_TOKEN are required for the promotion gate`);
+        }
+        return {
+            repo, token,
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+        };
+    }
+    /**
+     * Records that `runId`'s build reached uat successfully.
+     *
+     * Deliberately throws on failure instead of warning. A uat deploy whose
+     * evidence was not written is a build that cannot be promoted, and the only
+     * plausible cause is a caller that did not grant `contents: write` — a config
+     * error. Surfacing it here, on the uat run, is the whole point: the
+     * alternative is a green uat and a mystifying block at the prod gate days
+     * later, when whoever caused it has moved on.
+     */
+    static async record(runId) {
+        if (!runId) {
+            core.warning(`Promotion evidence NOT recorded: this deploy did not come from a CI artifact ` +
+                `(the dist was already in the workspace), so there is no run id to record. ` +
+                `A prod deploy of this build will be blocked.`);
+            return;
+        }
+        const { repo, headers } = this.api();
+        const sha = process.env.GITHUB_SHA ?? '';
+        const tag = this.tagName(runId);
+        const res = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
+            method: 'POST',
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ref: `refs/tags/${tag}`, sha }),
+        });
+        // 422 is "Reference already exists" — a redeploy of the same build to uat.
+        // That is the gate being satisfied twice, not a failure.
+        if (res.status === 422) {
+            core.info(`   promotion evidence: ${tag} (already recorded)`);
+            return;
+        }
+        if (!res.ok) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `The uat deploy succeeded but its promotion evidence could not be recorded: ` +
+                `creating tag '${tag}' failed (HTTP ${res.status}). Without it, promoting this ` +
+                `build to prod will be blocked.` +
+                (res.status === 403
+                    ? `\nHTTP 403 means the job's GITHUB_TOKEN lacks 'contents: write'. Add it to the ` +
+                        `'permissions:' block of the CALLING workflow — a reusable workflow cannot grant ` +
+                        `itself more than its caller has.`
+                    : ''));
+        }
+        core.info(`   promotion evidence: tagged ${tag} -> ${sha.slice(0, 7)}`);
+    }
+    /**
+     * Blocks unless `runId`'s build already reached uat.
+     *
+     * Fails closed: if the ref cannot be read at all, that is not evidence of
+     * promotion, so it blocks with a message saying which of the two it is.
+     */
+    static async verify(runId) {
+        // Before api(): this case needs no API call, and reporting a missing token
+        // would name the wrong problem.
+        if (!runId) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `BLOCKED: prod deploys must ship a build that already ran in uat, and this ` +
+                `deploy is not shipping a CI artifact at all (the dist was already present in ` +
+                `the workspace), so there is nothing to check it against. Re-dispatch with an ` +
+                `explicit run_id, or with sha_tag set to the commit to deploy.`);
+        }
+        const { repo, headers } = this.api();
+        const tag = this.tagName(runId);
+        const res = await fetch(`https://api.github.com/repos/${repo}/git/ref/tags/${tag}`, { headers });
+        if (res.ok) {
+            core.info(`   promotion gate: OK - build ${runId} already deployed to uat (${tag})`);
+            return;
+        }
+        if (res.status === 404) {
+            throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `BLOCKED: build from CI run ${runId} has never been deployed to uat, so it cannot ` +
+                `go to prod. Expected the tag '${tag}', which a successful uat deploy of this same ` +
+                `build creates.\n` +
+                `Deploy this run_id to uat first, then re-dispatch prod with the SAME run_id - ` +
+                `that is what makes it the same artifact rather than a rebuild.\n` +
+                `Hotfixes are exempt by design (hotfix/* ships straight to prod). To override in an ` +
+                `emergency set DEPLOY_SKIP_PROMOTION_GATE=true, and say why in the run.`);
+        }
+        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `BLOCKED: cannot evaluate the promotion gate for prod - reading tag '${tag}' failed ` +
+            `(HTTP ${res.status}). This is NOT a statement about whether the build reached uat; ` +
+            `the gate fails closed when it cannot see the evidence.`);
+    }
+}
+exports.S3PromotionEvidence = S3PromotionEvidence;
+//# sourceMappingURL=S3PromotionEvidence.js.map
 
 /***/ }),
 
