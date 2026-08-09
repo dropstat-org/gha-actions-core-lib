@@ -584,7 +584,13 @@ jobs:
     environment: ${{ needs.config.outputs.deploy_environment }}
     permissions:
       id-token: write
-      contents: read
+      # write, not read: after a uat deploy this job records the promotion
+      # evidence as the tag uat-deployed/<runId> (S3PromotionEvidence), which the
+      # prod gate then requires. With contents:read the deploy succeeds and the
+      # tag POST comes back 403, leaving a build that can never reach prod.
+      # Every caller already declares contents: write, so this does not widen the
+      # startup-validated intersection.
+      contents: write
       actions:  read   # gh run download of the CI dist artifact
     steps:
       - uses: actions/checkout@v4.2.2
