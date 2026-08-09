@@ -51,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
       - id: ActionsCoreLib
-        uses: dropstat-org/gha-actions-core-lib@main
+        uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: config
 
@@ -75,7 +75,7 @@ jobs:
         uses: stCarolas/setup-maven@v5
         with:
           maven-version: ${{ needs.config.outputs.tools_maven }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: compile
 
@@ -89,7 +89,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: unit_test
 
@@ -103,7 +103,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: linter
 
@@ -120,7 +120,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: semgrep
         env:
@@ -136,7 +136,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: sonarqube
         env:
@@ -156,7 +156,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: trivy
 
@@ -167,7 +167,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: checkov
 
@@ -197,7 +197,7 @@ jobs:
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: publish
         env:
@@ -217,7 +217,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: pre_deploy
 
@@ -228,7 +228,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: generic
 
@@ -250,7 +250,7 @@ jobs:
           session-name: GitHubActions-plan
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: plan
         env:
@@ -271,7 +271,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: checkov_tf
 
@@ -306,7 +306,7 @@ jobs:
           session-name: GitHubActions-deploy
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: deploy
         env:
@@ -330,7 +330,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: post_deploy
 
@@ -355,7 +355,7 @@ jobs:
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: release
         env:
@@ -388,7 +388,7 @@ jobs:
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/bundle-publish-app-token
         with:
           stage: ecs_deploy
         env:
