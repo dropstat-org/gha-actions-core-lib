@@ -37,6 +37,19 @@ jobs:
   ci:
     uses: dropstat-org/gha-actions-core-lib/.github/workflows/pipeline-ci.yml@main
     secrets: inherit
+    with:
+      # Private repos get the self-hosted fleet, as always. PUBLIC repos must not:
+      # the org's "Default" runner group has allows_public_repositories = false, so
+      # GitHub never assigns a self-hosted runner to them and the job sits queued
+      # until the queue timeout marks the run `cancelled`. Since this workflow is
+      # injected org-wide by the ruleset, that leaves the required check permanently
+      # pending on every PR of a public repo - gha-actions-core-lib is the one we
+      # have today, and it is where this was found.
+      #
+      # Flipping the runner group to allow public repos is the alternative, and it
+      # is the wrong one: it lets a pull request from any fork run arbitrary code on
+      # runners that live inside the VPC.
+      runner: ${{ github.event.repository.private && '["self-hosted","aws","dropstat"]' || '["ubuntu-latest"]' }}
 
   # Guards against pipeline-cd.yml's run-name block drifting from the safe
   # pattern (see scripts/check-run-name.py for the full rationale: run-name
