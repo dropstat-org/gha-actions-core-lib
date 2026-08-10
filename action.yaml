@@ -9,7 +9,16 @@ metadata:
 tools:
   node: "24"
 
-stages:
-  - name: unit_test
-  - name: linter
-  - name: release
+# This repo is the DISTRIBUTION half of the library: it carries the compiled
+# dist/ bundle and the reusable workflows, and nothing else. The TypeScript
+# source, its tests and its linter live in gha-actions-core-lib-src, which is
+# where they run.
+#
+# So there is deliberately no unit_test / linter here - a stage with no commands
+# fails with MISSING_STAGE_COMMANDS - and no release either: this repo has no
+# AWS role, and the release stage died on `sts:AssumeRoleWithWebIdentity`.
+#
+# None of that was visible until now because this workflow could never execute
+# (see the runner note in .github/workflows/actions-core-lib.yml). semgrep and
+# sonarqube are still injected automatically by `type: library` and do run.
+stages: []
