@@ -12,31 +12,15 @@ name: Required CI
 #   - tf   -> plan + checks
 # A dev cannot bypass the pipeline by adding their own workflow: this one is
 # injected org-wide by the ruleset and always runs the library's logic.
-#
-# `push` is here for one reason: the ruleset rule that requires this workflow is
-# evaluated on EVERY ref update, pushes included. A workflow that does not list
-# `push` can never have run for the commit a push is trying to land, so the rule
-# is unsatisfiable and the push is rejected with GH013 - no matter how green the
-# repo's own CI is. `do_not_enforce_on_create = true` hid it: the first push of a
-# new branch is exempt, so the deadlock only appeared on the SECOND commit, and
-# the workaround (new branch per commit, or a draft PR to force a pull_request
-# event) is not a way to work.
-#
-# The `ci` job below is deliberately NOT run on push - see the comment there.
 on:
   pull_request:
-  push:
   workflow_dispatch:
 
-# On pull_request, serialize with the repo's own pipeline-ci/pipeline-cd (same
-# group) so the required-CI plan never runs concurrently with a deploy and
-# collides on the terraform state lock.
-#
-# On push it must NOT join that group: this run is what unblocks the developer's
-# NEXT push, so queuing it behind a long terraform apply would block them for as
-# long as the apply takes. It shares no state with anything, so it needs no lock.
+# Serialize with the repo's own pipeline-ci/pipeline-cd (same group) so the
+# required-CI plan never runs concurrently with a deploy and collides on the
+# terraform state lock.
 concurrency:
-  group: ${{ github.event_name == 'push' && format('required-ci-push-{0}-{1}', github.repository, github.ref) || format('tf-{0}', github.repository) }}
+  group: tf-${{ github.repository }}
   cancel-in-progress: false
 
 # GitHub validates ALL permissions declared by ANY job in the called reusable at
@@ -50,19 +34,7 @@ permissions:
   actions:         write   # trigger_cd job in pipeline-ci needs it (else startup_failure)
 
 jobs:
-  # Not on push. pipeline-ci.yml gates its `trigger_cd` job on
-  # `github.event_name == 'push'`, and in a reusable workflow that reads the
-  # CALLER's event - so running this on push would mean the repo's own
-  # pipeline-ci AND this one both executing the full pipeline for the same
-  # commit, and both dispatching a CD. Two deploys per merge, and double the
-  # runner cost on a fleet that is already the bottleneck.
-  #
-  # Skipping it costs nothing: on push the repo's own pipeline-ci does the real
-  # work, and this workflow only has to CONCLUDE successfully for the ruleset to
-  # be satisfied - which run-name-check below is enough to do. The governance
-  # gate itself is unchanged, because it always lived on the pull_request path.
   ci:
-    if: github.event_name != 'push'
     uses: dropstat-org/gha-actions-core-lib/.github/workflows/pipeline-ci.yml@main
     secrets: inherit
     with:
