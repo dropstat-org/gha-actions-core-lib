@@ -405,6 +405,13 @@ jobs:
     if: |
       always() &&
       github.event_name == 'push' &&
+      # config is the job that resolves the branch -> environment routing and runs
+      # the platform-level gates (branch naming among them). It was in `needs` but
+      # not in this condition, and under always() that meant a FAILED config still
+      # dispatched a CD: a branch blocked at config was caught only later by the
+      # environment branch policy, and would not have been caught at all had config
+      # failed for a reason the policy does not cover.
+      needs.config.result == 'success' &&
       (needs.compile.result  == 'success' || needs.compile.result == 'skipped') &&
       (needs.publish.result  == 'success' || needs.publish.result == 'skipped') &&
       needs.unit_test.result != 'failure' &&
