@@ -818,6 +818,8 @@ var ErrorCode;
     ErrorCode["MISSING_IMAGE_REF"] = "MISSING_IMAGE_REF";
     ErrorCode["MISSING_REGISTRY_CONFIG"] = "MISSING_REGISTRY_CONFIG";
     ErrorCode["ECR_IMAGE_NOT_FOUND"] = "ECR_IMAGE_NOT_FOUND";
+    // Branch naming
+    ErrorCode["BRANCH_NAME_NOT_ALLOWED"] = "BRANCH_NAME_NOT_ALLOWED";
     // Hotfix emergency
     ErrorCode["HOTFIX_EXCEPTION_NOT_ALLOWED"] = "HOTFIX_EXCEPTION_NOT_ALLOWED";
     // Analyzer
@@ -919,6 +921,7 @@ const QualityStageInjector_1 = __nccwpck_require__(70934);
 const SemgrepToggle_1 = __nccwpck_require__(99528);
 const StaticReleaseInjector_1 = __nccwpck_require__(97428);
 const BranchDetector_1 = __nccwpck_require__(90609);
+const BranchNameConvention_1 = __nccwpck_require__(89771);
 const StageName_1 = __nccwpck_require__(90969);
 const ValidateApproverStage_1 = __nccwpck_require__(18487);
 const ValidateConfirmStage_1 = __nccwpck_require__(63182);
@@ -953,6 +956,10 @@ async function run() {
         StaticReleaseInjector_1.StaticReleaseInjector.inject(config, branchType, workflow);
         workflow.checkStages(config.stages, branchType);
         if (stageName === StageName_1.StageName.CONFIG) {
+            // Only from the config job: it runs once per pipeline and is the job the
+            // org's Required CI ruleset injects everywhere, which is what gives this
+            // check the org-wide reach the naming ruleset itself cannot have.
+            BranchNameConvention_1.BranchNameConvention.check();
             await OutputWriter_1.OutputWriter.writeFlags(config, branchType, workflow);
             return;
         }
@@ -2809,8 +2816,18 @@ const EXPECTED_ACCOUNT = {
 //          GitHub Environment approval is already the boundary that matters there.
 //          Prod is the only real promotion, and it is unaffected: :uat is applied
 //          by AppRelease only after a uat deploy actually succeeded.
+// `hotfix-<shaTag>` is accepted alongside ':uat' for the same reason release-sha-xxx
+// is accepted on the way into uat (see PublishStage): a hotfix builds its own image
+// and ships straight to prod, so it can never carry ':uat' and the branch tag is the
+// only evidence the gate can check. Only the pipeline can push it - that is the same
+// trust boundary the rest of the chain rests on.
+//
+// It has to be a TAG rather than a branch check because the deploy runs from main:
+// the hotfix is merged first (squash, so the sha on main is a new one) and prod is
+// dispatched from there, at which point the run's own branch says nothing about where
+// the image came from. The image's tags survive the merge; the branch name does not.
 const PROMOTION_EVIDENCE = {
-    [Environment_1.Environment.PROD]: () => ['uat'],
+    [Environment_1.Environment.PROD]: (shaTag) => ['uat', `hotfix-${shaTag}`],
 };
 /**
  * ECSDeployStage — native ECS deployment using task definition registration.
@@ -3545,6 +3562,7 @@ const ErrorCode_1 = __nccwpck_require__(9727);
 const DeploySummary_1 = __nccwpck_require__(54086);
 const DeployProvenance_1 = __nccwpck_require__(57847);
 const S3PromotionEvidence_1 = __nccwpck_require__(34485);
+const DeployAncestry_1 = __nccwpck_require__(89217);
 const BranchType_1 = __nccwpck_require__(22302);
 /**
  * S3DeployStage — static frontend deploy (S3 sync + CloudFront invalidation).
@@ -3645,7 +3663,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         // Empty/unset → auto-pick the latest successful CI run with the artifact.
         const runIdRaw = process.env.DEPLOY_ARTIFACT_RUN_ID?.trim();
         const runIdOverride = runIdRaw && /^\d+$/.test(runIdRaw) ? Number(runIdRaw) : undefined;
-        const { fromRun, shortSha, provenance } = await this.downloadDist(artifact, distPath, runIdOverride);
+        const { fromRun, shortSha, provenance, headBranch, headSha } = await this.downloadDist(artifact, distPath, runIdOverride);
         // ── Promotion gate (prod only) ─────────────────────────────────────────────
         // Nothing reaches production without having actually run in uat first. dev, qa
         // and uat are deliberately NOT gated: a feature branch must be free to reach any
@@ -3660,10 +3678,42 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         //
         // Hotfix is the deliberate exception, matching the backend: a hotfix builds its
         // own bundle and ships straight to prod, which is the entire point of the branch.
+        //
+        // The exception keys off the branch that BUILT the artifact, not the branch this
+        // run sits on. A hotfix is merged to main and the prod deploy is dispatched from
+        // there, so by deploy time `this.branchType` is MAIN and a check on it would never
+        // fire - every hotfix would be blocked for lacking uat evidence it is not supposed
+        // to have. The artifact's own head_branch stays hotfix/* regardless (squash merge
+        // rewrites the sha on main, but not the CI run the bundle came from).
         const skipGate = process.env.DEPLOY_SKIP_PROMOTION_GATE === 'true';
-        const isHotfixToProd = this.branchType === BranchType_1.BranchType.HOTFIX && effectiveEnv === Environment_1.Environment.PROD;
+        const builtOnHotfix = /^hotfix\//.test(headBranch ?? '') || this.branchType === BranchType_1.BranchType.HOTFIX;
+        const isHotfixToProd = builtOnHotfix && effectiveEnv === Environment_1.Environment.PROD;
         if (effectiveEnv === Environment_1.Environment.PROD && !isHotfixToProd && !skipGate) {
             await S3PromotionEvidence_1.S3PromotionEvidence.verify(fromRun);
+        }
+        else if (effectiveEnv === Environment_1.Environment.PROD) {
+            // Say which exemption applied. A prod deploy that quietly skips the gate is
+            // indistinguishable from one that passed it when reading the log later.
+            core.info(`   promotion gate: SKIPPED (${isHotfixToProd
+                ? `hotfix build from '${headBranch ?? this.branchType}' ships straight to prod`
+                : 'DEPLOY_SKIP_PROMOTION_GATE=true'})`);
+        }
+        // ── Ancestry gate (uat only) ───────────────────────────────────────────────
+        // The environment policy checks the ref the RUN came from and nothing else, so
+        // a uat dispatch from release/x could be handed the run_id of any feature build
+        // and would ship it - the input was never validated against the ref.
+        //
+        // Ancestry rather than the artifact's branch name, so cutting a release from a
+        // feature commit still deploys the bundle already built there (build-once); see
+        // DeployAncestry. dev and qa stay open on purpose - a feature belongs there.
+        // Prod is covered by the promotion gate above, and squash merges rule ancestry
+        // out there anyway.
+        if (effectiveEnv === Environment_1.Environment.UAT && fromRun && !skipGate) {
+            const dispatchRef = (process.env.GITHUB_REF_NAME ?? '').replace(/^refs\/heads\//, '');
+            await DeployAncestry_1.DeployAncestry.verify(dispatchRef, headSha ?? '', fromRun, headBranch);
+        }
+        else if (effectiveEnv === Environment_1.Environment.UAT && fromRun) {
+            core.info(`   ancestry: SKIPPED (DEPLOY_SKIP_PROMOTION_GATE=true)`);
         }
         // Resolve the real content root: the artifact may carry a top-level dir (e.g. a
         // CRA artifact uploaded with `path: build/` zips as `build/index.html`), which —
@@ -3939,7 +3989,7 @@ class S3DeployStage extends AbstractBranchStage_1.AbstractBranchStage {
         const provenance = headBranch
             ? `branch=${headBranch} run=${fromRun}${builtBy ? ` actor=${builtBy}` : ''}`
             : undefined;
-        return { fromRun, shortSha, provenance };
+        return { fromRun, shortSha, provenance, headBranch: headBranch || undefined, headSha: headSha || undefined };
     }
     /**
      * Returns the directory that actually holds the site (where index.html lives).
@@ -4079,6 +4129,7 @@ const ActionsType_1 = __nccwpck_require__(15515);
 const Env_1 = __nccwpck_require__(45188);
 const ReleaseCut_1 = __nccwpck_require__(69272);
 const ImageSHA_1 = __nccwpck_require__(2870);
+const EnvironmentBranchPolicy_1 = __nccwpck_require__(83160);
 /** Environment a pushed branch deploys to, or null when it deploys nowhere. */
 function environmentFor(ref) {
     const branch = ref.replace(/^refs\/heads\//, '');
@@ -4272,7 +4323,7 @@ class TriggerCdStage {
         // this step running. On 2026-08-03 that raced desktop-app's CI into a red badge
         // over a perfectly good build. Retry on the default branch and say so.
         if (res.status === 422 && body.includes('No ref found for')) {
-            const fallback = await this.defaultBranch();
+            const fallback = await this.fallbackRef(inputs.environment);
             core.warning(`Branch '${Env_1.Env.refName()}' no longer exists - it was most likely auto-deleted when its ` +
                 `PR merged, while this run was still going. Re-dispatching Pipeline CD from '${fallback}'. ` +
                 `Only the workflow file is read from there; the deploy still targets ` +
@@ -4391,6 +4442,55 @@ class TriggerCdStage {
     }
     static sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+    /**
+     * The ref to re-dispatch from when the run's own branch is gone.
+     *
+     * This used to be the default branch unconditionally, on the reasoning that the ref
+     * "is only where the CD reads its workflow FILE from". That stopped being true once
+     * the environments got branch policies: the ref a run is created from is also what
+     * GitHub matches the policy against. So re-dispatching a dev deploy from `main` is
+     * not a recovery at all - `dev` allows develop plus the feature and hotfix globs,
+     * never main, so the new run is rejected before it does anything. Not hypothetical: it is
+     * what happened to a deploy on 2026-08-09, and it read as a pipeline bug because the
+     * dispatch reported success and the failure surfaced in a different run.
+     *
+     * So: pick a ref the TARGET ENVIRONMENT accepts. The default branch is still tried
+     * first - for prod it is the right answer and it always exists - and anything else
+     * has to both match a policy pattern and exist as a real branch.
+     */
+    static async fallbackRef(environment) {
+        const def = await this.defaultBranch();
+        const patterns = await EnvironmentBranchPolicy_1.EnvironmentBranchPolicy.branchPatterns(environment);
+        // null = no restriction to check against, or it could not be read. Either way the
+        // old behaviour is the best guess available, and guessing beats refusing here.
+        if (!patterns)
+            return def;
+        if (EnvironmentBranchPolicy_1.EnvironmentBranchPolicy.allows(patterns, def))
+            return def;
+        // Only literal patterns are usable: `feature/*` names no branch in particular, and
+        // inventing one would dispatch from a ref that does not exist.
+        const literals = patterns.filter(p => !p.includes('*'));
+        for (const candidate of literals) {
+            if (await this.refExists(candidate)) {
+                core.info(`Default branch '${def}' cannot deploy to '${environment}' - falling back to '${candidate}'.`);
+                return candidate;
+            }
+        }
+        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.MISSING_STAGE_COMMANDS, `Cannot re-dispatch Pipeline CD: the branch this run is on no longer exists, and no ` +
+            `branch that environment '${environment}' accepts is usable as a replacement ` +
+            `(it allows ${patterns.join(', ')}; the default branch '${def}' is not among them` +
+            `${literals.length ? `, and none of ${literals.join(', ')} exist` : ' and the rest are glob patterns'}).\n` +
+            `The build itself is fine - deploy it manually from an allowed branch with the run_id above.`);
+    }
+    static async refExists(branch) {
+        try {
+            const res = await this.request(`/repos/${Env_1.Env.repository()}/git/ref/heads/${branch}`, { headers: this.headers() });
+            return res.ok;
+        }
+        catch {
+            return false;
+        }
     }
     /** Not hardcoded to 'main': this org still has repos whose default branch is 'master'. */
     static async defaultBranch() {
@@ -6714,6 +6814,213 @@ exports.BranchUtils = BranchUtils;
 
 /***/ }),
 
+/***/ 89771:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.BranchNameConvention = void 0;
+const fs = __importStar(__nccwpck_require__(79896));
+const core = __importStar(__nccwpck_require__(37484));
+const ActionYaml_1 = __nccwpck_require__(9192);
+const ErrorCode_1 = __nccwpck_require__(9727);
+/**
+ * BranchNameConvention — enforces the GitFlow branch names that the org ruleset
+ * cannot.
+ *
+ * `dropstat-org` has an organization ruleset called "Branch naming convention"
+ * carrying a `branch_name_pattern` rule with exactly the regex below. Terraform
+ * applies it cleanly, the UI shows it `active`, and
+ * `GET /repos/{o}/{r}/rules/branches/{branch}` reports that it applies — but it
+ * does not actually reject anything. `branch_name_pattern` is a ruleset METADATA
+ * restriction, and those need GitHub Enterprise Cloud; the org is on the Team
+ * plan, so the rule is accepted and silently ignored. Verified on 2026-08-09 by
+ * creating `chore/`, `fix/`, `revert/`, a bare name and a three-level
+ * `feature/a/b/c` in a test repo, both through the API and through a real git
+ * push: all nine were created.
+ *
+ * That silent failure is worse than no rule at all, because everything about it
+ * looks like it is working. So the pattern is enforced here instead, on a path
+ * every repo already runs: the config job of pipeline-ci, which the org's
+ * "Required CI workflow" ruleset injects org-wide — and that ruleset IS
+ * enforced.
+ *
+ * ── Only on branch creation, on purpose ──────────────────────────────────────
+ * A ruleset would have rejected the CREATION of a badly named branch and left
+ * existing ones alone. A CI check does not get that for free: it runs on every
+ * push, so failing unconditionally would break every legacy branch still in
+ * flight. That is not hypothetical — at the time of writing, 11 of the 31 open
+ * PRs across the app repos have head branches that predate the convention
+ * (`DDB-3196/rajesh/UiUpdate`, `rajesh/release_5.0`, ...).
+ *
+ * So the block is scoped to branches that are NEW:
+ *
+ *   push  - only when the payload says `created: true`, the first push of a new
+ *           branch and the closest thing to the ruleset's own trigger.
+ *   PR    - only when the pull request was opened on or after CUTOVER. The push
+ *           path alone is not enough: pipeline-ci.yml filters its push trigger by
+ *           prefix (`feature/**`, `hotfix/**`, `release/**`, develop, main), so a
+ *           branch named `chore/x` never triggers it at all and would sail
+ *           through unexamined. required-ci.yml runs on `pull_request` in every
+ *           repo, which is the one path an off-convention branch cannot avoid if
+ *           it wants to merge.
+ *
+ * The date comparison is what keeps the legacy PRs alive: they were all opened
+ * before the cutover, so they warn and merge. It also expires by itself - no
+ * allowlist to prune, and nothing to remember to turn on later.
+ *
+ * Anything else gets a warning annotation: it makes the legacy names visible
+ * without holding anyone's work hostage.
+ *
+ * Fails OPEN when the event payload cannot be read. A branch name is a
+ * convention, not a security boundary, and no build should die because a JSON
+ * file was missing.
+ */
+class BranchNameConvention {
+    /**
+     * Kept character-for-character in sync with the `branch_name_pattern` rule of
+     * the org ruleset (github-org `org/config/rulesets.tf`). When the org moves to
+     * Enterprise Cloud and the ruleset starts enforcing on its own, the two must
+     * still agree, or a branch passes one gate and fails the other.
+     */
+    static PATTERN = /^(main|master|develop)$|^(feature|hotfix|release)\/[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)?$|^dependabot\/.+$/;
+    /** Trunk-based repos have no develop/release/hotfix — only the mainline and features. */
+    static TRUNK_PATTERN = /^(main|master)$|^feature\/[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)?$|^dependabot\/.+$/;
+    static allows(branch, strategy = process.env.BRANCHING_STRATEGY ?? 'gitflow') {
+        return (strategy === 'trunk' ? this.TRUNK_PATTERN : this.PATTERN).test(branch);
+    }
+    /**
+     * PRs opened on or after this instant must have a conforming head branch.
+     * A week past the day the check shipped (2026-08-10), so the team gets told
+     * before anything of theirs starts failing. Every PR already in flight is
+     * grandfathered regardless - the date only decides when NEW ones are refused.
+     */
+    static CUTOVER = Date.parse('2026-08-17T00:00:00Z');
+    static payload() {
+        const path = process.env.GITHUB_EVENT_PATH ?? '';
+        if (!path)
+            return null;
+        try {
+            return JSON.parse(fs.readFileSync(path, 'utf8'));
+        }
+        catch {
+            // Unreadable payload: cannot tell a new branch from an old one, and guessing
+            // "new" would fail legitimate work. The caller degrades to a warning.
+            return null;
+        }
+    }
+    /** True when this run is about a branch that is new to the convention. */
+    static isNewBranch() {
+        const event = process.env.GITHUB_EVENT_NAME ?? '';
+        const p = this.payload();
+        if (!p)
+            return false;
+        if (event === 'push')
+            return p.created === true;
+        const created = p.pull_request?.created_at;
+        if (!created)
+            return false;
+        const opened = Date.parse(created);
+        return Number.isFinite(opened) && opened >= this.CUTOVER;
+    }
+    /**
+     * The branch under test. On pull_request GITHUB_REF is the synthetic merge ref
+     * (refs/pull/N/merge), which is not a branch name at all - the head branch is
+     * the thing being judged.
+     */
+    static currentBranch() {
+        return (process.env.GITHUB_EVENT_NAME ?? '') === 'pull_request'
+            ? (process.env.GITHUB_HEAD_REF ?? '')
+            : (process.env.GITHUB_REF_NAME ?? '').replace(/^refs\/heads\//, '');
+    }
+    /** Blocks a newly created branch whose name is off-convention; warns otherwise. */
+    static check() {
+        // CI events only. A workflow_dispatch/workflow_run config job is a DEPLOY of a
+        // branch that already exists - naming it there is too late to act on, and would
+        // just annotate every legacy-branch deploy with a warning nobody asked for.
+        const event = process.env.GITHUB_EVENT_NAME ?? '';
+        if (event !== 'push' && event !== 'pull_request')
+            return;
+        const branch = this.currentBranch();
+        if (!branch)
+            return;
+        if (this.allows(branch))
+            return;
+        const strategy = process.env.BRANCHING_STRATEGY ?? 'gitflow';
+        const allowed = strategy === 'trunk'
+            ? 'main / master, feature/<desc>'
+            : 'main / master / develop, feature/<desc>, hotfix/<desc>, release/<version>';
+        // Every prefix takes an optional second segment, release/ included - keep this
+        // in step with PATTERN, which is the thing that actually decided to reject.
+        const shape = `Each prefix takes one or two segments: feature/DDB-1234 and ` +
+            `feature/DDB-1234/short-description are both fine, feature/a/b/c is not. ` +
+            `Same shape for hotfix/ and release/ (release/2026-08, release/2026-08/rc1).`;
+        // Suggest a rename that keeps the branch's own prefix when it already has a
+        // valid one - a release branch told to become feature/<description> would be
+        // routed to the wrong environment by the very rule this message is explaining.
+        const prefix = branch.split('/')[0];
+        const known = strategy === 'trunk' ? ['feature'] : ['feature', 'hotfix', 'release'];
+        const suggested = known.includes(prefix)
+            ? `${prefix}/<description>`
+            : 'feature/<description>';
+        if (!this.isNewBranch()) {
+            core.warning(`Branch '${branch}' does not follow the GitFlow naming convention (${allowed}). ` +
+                `It predates the rule, so this is a warning and not a failure - rename it when ` +
+                `convenient. Branches and pull requests created from now on are rejected.`);
+            return;
+        }
+        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.BRANCH_NAME_NOT_ALLOWED, `BLOCKED: '${branch}' is not a valid branch name.\n` +
+            `Allowed: ${allowed}${strategy === 'trunk' ? '' : ', plus dependabot/*'}.\n` +
+            `${shape}\n` +
+            `The prefix is not cosmetic - it is what routes the pipeline. It decides which ` +
+            `environment a build deploys to, whether the branch rebuilds or promotes an existing ` +
+            `artifact, and which protection rules apply. A branch named 'chore/x' or 'x' has no ` +
+            `route, so its deploy is undefined.\n` +
+            `Rename it and push again:\n` +
+            `  git branch -m ${branch} ${suggested}\n` +
+            `  git push origin -u ${suggested}\n` +
+            `  git push origin --delete ${branch}`);
+    }
+}
+exports.BranchNameConvention = BranchNameConvention;
+//# sourceMappingURL=BranchNameConvention.js.map
+
+/***/ }),
+
 /***/ 18753:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -6808,6 +7115,121 @@ class Credentials {
 }
 exports.Credentials = Credentials;
 //# sourceMappingURL=Credentials.js.map
+
+/***/ }),
+
+/***/ 89217:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DeployAncestry = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const ActionYaml_1 = __nccwpck_require__(9192);
+const ErrorCode_1 = __nccwpck_require__(9727);
+/**
+ * DeployAncestry — makes a uat deploy prove the build it ships actually belongs
+ * to the release it is dispatched from.
+ *
+ * The GitHub Environment policy only checks the ref the RUN was created from, and
+ * the promotion gate only applies to prod. Between them there was a hole: dispatch
+ * uat from `release/x` and hand it the `run_id` of a build from any feature branch,
+ * and it deployed - the run_id was never validated against the ref at all.
+ *
+ * The check is ANCESTRY, not the artifact's branch name, because build-once has to
+ * keep working: cutting `release/x` from a feature commit is expected to deploy the
+ * bundle that was already built on that feature branch rather than rebuild it. That
+ * commit IS an ancestor of the release branch, so ancestry accepts it while still
+ * rejecting a build that was never merged into the release.
+ *
+ * Not applied to prod: a squash merge rewrites the sha on `main`, so a hotfix build
+ * is never an ancestor of the branch it deploys from. Prod is covered by the
+ * promotion-evidence gate instead.
+ *
+ * Fails OPEN when the comparison cannot be made (no token, unknown sha, API
+ * trouble). This is a wrong-input guard, not a security control - the environment
+ * approval is still the boundary - and it must not take down a legitimate deploy
+ * because the compare endpoint blinked.
+ */
+class DeployAncestry {
+    /**
+     * Blocks when `headSha` (the commit the artifact was built from) is not reachable
+     * from `ref` (the branch the deploy was dispatched from).
+     */
+    static async verify(ref, headSha, fromRun, headBranch) {
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        const token = process.env.GITHUB_TOKEN ?? '';
+        if (!repo || !token || !ref || !headSha) {
+            core.warning(`Skipping the ancestry check for CI run ${fromRun || '?'}: missing ` +
+                `${!token ? 'GITHUB_TOKEN' : !repo ? 'GITHUB_REPOSITORY' : !ref ? 'the dispatch ref' : "the build's commit"}.`);
+            return;
+        }
+        let status;
+        try {
+            const res = await fetch(`https://api.github.com/repos/${repo}/compare/${encodeURIComponent(ref)}...${headSha}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } });
+            if (!res.ok) {
+                core.warning(`Cannot compare '${ref}' with ${headSha.slice(0, 7)} (HTTP ${res.status}) - skipping the ancestry check.`);
+                return;
+            }
+            status = (await res.json()).status ?? '';
+        }
+        catch (e) {
+            core.warning(`Ancestry comparison failed (${String(e)}) - skipping the ancestry check.`);
+            return;
+        }
+        // base...head: 'behind' = head is an ancestor of base, 'identical' = same commit.
+        // 'ahead' and 'diverged' both mean the build carries commits the release does not.
+        if (status === 'behind' || status === 'identical') {
+            core.info(`   ancestry: build ${headSha.slice(0, 7)} is part of '${ref}' (${status})`);
+            return;
+        }
+        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `BLOCKED: the build being deployed is not part of '${ref}'.\n` +
+            `CI run ${fromRun} built commit ${headSha.slice(0, 7)}` +
+            `${headBranch ? ` on '${headBranch}'` : ''}, which is '${status || 'unrelated'}' relative to ` +
+            `'${ref}' - that commit was never merged into it.\n` +
+            `A deploy dispatched from '${ref}' has to ship something that branch actually contains, ` +
+            `otherwise the branch name says nothing about what is running.\n` +
+            `Merge the commit into '${ref}' first, or dispatch with a run_id built from it. ` +
+            `Cutting a release branch from the commit also works and does NOT require a rebuild - ` +
+            `the build stays an ancestor, which is exactly what build-once relies on.`);
+    }
+}
+exports.DeployAncestry = DeployAncestry;
+//# sourceMappingURL=DeployAncestry.js.map
 
 /***/ }),
 
@@ -7182,6 +7604,205 @@ class Env {
 }
 exports.Env = Env;
 //# sourceMappingURL=Env.js.map
+
+/***/ }),
+
+/***/ 83160:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.EnvironmentBranchPolicy = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const ActionYaml_1 = __nccwpck_require__(9192);
+const ErrorCode_1 = __nccwpck_require__(9727);
+/**
+ * EnvironmentBranchPolicy — turns GitHub's late, contextless deployment-branch
+ * rejection into an early, actionable failure.
+ *
+ * A GitHub Environment can restrict which branches may deploy to it. The rule is
+ * evaluated against the branch the RUN was created from ("Use workflow from"),
+ * NOT the `branch`/`deploy_ref` input that says which commit to ship. Those two
+ * are different things and routinely disagree: dispatching uat while sitting on
+ * `main` is rejected even though the input names a release branch.
+ *
+ * When it trips, the deploy job is failed by GitHub itself before any step runs,
+ * so the lib never gets to say anything. All the operator sees is:
+ *
+ *     Branch "main" is not allowed to deploy to uat due to environment
+ *     protection rules.
+ *
+ * — with no indication of which branches ARE allowed. This class runs in the
+ * config job, which has no `environment:` of its own and therefore is not
+ * subject to the rule, and reports the allowed patterns while there is still
+ * something to do about it.
+ *
+ * Fails OPEN on purpose. This is a usability pre-check, not a security control:
+ * GitHub enforces the real rule regardless. If the policy cannot be read — no
+ * token, environment not created yet, API trouble — that must not take down a
+ * deploy that GitHub would have allowed.
+ */
+class EnvironmentBranchPolicy {
+    /** GitHub deployment-branch globs: `*` matches within a path segment only. */
+    static matches(pattern, branch) {
+        const rx = new RegExp('^' + pattern.split('*').map(p => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*') + '$');
+        return rx.test(branch);
+    }
+    /** True when `branch` satisfies one of the environment's branch patterns. */
+    static allows(patterns, branch) {
+        return patterns.some(p => this.matches(p, branch));
+    }
+    /**
+     * The BRANCH patterns `environment` accepts, or null when there is no restriction
+     * to report - unrestricted, protected-branches-only, or simply unreadable. Callers
+     * treat null as "cannot tell" and must not turn it into a refusal.
+     */
+    static async branchPatterns(environment) {
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        const token = process.env.GITHUB_TOKEN ?? '';
+        if (!environment || !repo || !token)
+            return null;
+        const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
+        const base = `https://api.github.com/repos/${repo}/environments/${encodeURIComponent(environment)}`;
+        try {
+            const res = await fetch(base, { headers });
+            if (!res.ok)
+                return null;
+            const policy = (await res.json()).deployment_branch_policy ?? null;
+            if (!policy || !policy.custom_branch_policies)
+                return null;
+            const listRes = await fetch(`${base}/deployment-branch-policies`, { headers });
+            if (!listRes.ok)
+                return null;
+            const list = (await listRes.json())
+                .branch_policies ?? [];
+            // Branch patterns only - a tag pattern is not a ref anything can be dispatched
+            // from as a branch, so offering one as a fallback ref would just fail again.
+            const names = list.filter(p => (p.type ?? 'branch') === 'branch').map(p => p.name);
+            return names.length ? names : null;
+        }
+        catch {
+            return null;
+        }
+    }
+    /**
+     * Blocks when `branch` cannot deploy to `environment` under the repo's policy.
+     * A no-op when the environment has no branch restriction.
+     */
+    static async check(environment, branch) {
+        const repo = process.env.GITHUB_REPOSITORY ?? '';
+        const token = process.env.GITHUB_TOKEN ?? '';
+        if (!environment || !branch || !repo || !token) {
+            core.warning(`Skipping the environment branch-policy pre-check for '${environment || '?'}': ` +
+                `missing ${!token ? 'GITHUB_TOKEN' : !repo ? 'GITHUB_REPOSITORY' : 'branch name'}. ` +
+                `GitHub will still enforce the policy, but the failure will arrive later and without context.`);
+            return;
+        }
+        const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
+        const base = `https://api.github.com/repos/${repo}/environments/${encodeURIComponent(environment)}`;
+        let policy;
+        try {
+            const res = await fetch(base, { headers });
+            if (!res.ok) {
+                core.warning(`Cannot read environment '${environment}' (HTTP ${res.status}) - skipping the branch-policy pre-check.`);
+                return;
+            }
+            policy = (await res.json()).deployment_branch_policy ?? null;
+        }
+        catch (e) {
+            core.warning(`Environment lookup failed (${String(e)}) - skipping the branch-policy pre-check.`);
+            return;
+        }
+        // null = every branch may deploy. protected_branches = the repo's protection
+        // rules decide, which this class cannot evaluate cheaply, so leave it to GitHub.
+        if (!policy || !policy.custom_branch_policies)
+            return;
+        // The endpoint returns branch AND tag patterns in one list, told apart by
+        // `type`. They are not interchangeable: uat allows the branches release/*
+        // and, separately, the tags v*-rc.* (the tag-driven upper-env model). Naming
+        // a tag pattern as an allowed branch sends the operator to cut a branch
+        // called v1-rc.2, which GitHub then rejects just the same.
+        let policies;
+        try {
+            const res = await fetch(`${base}/deployment-branch-policies`, { headers });
+            if (!res.ok) {
+                core.warning(`Cannot list branch policies for '${environment}' (HTTP ${res.status}) - skipping the pre-check.`);
+                return;
+            }
+            policies = (await res.json()).branch_policies ?? [];
+        }
+        catch (e) {
+            core.warning(`Branch-policy list failed (${String(e)}) - skipping the pre-check.`);
+            return;
+        }
+        // An empty custom list means nothing may deploy. That is a misconfigured
+        // environment rather than a wrong dispatch, so say so instead of naming branches.
+        if (policies.length === 0) {
+            core.warning(`Environment '${environment}' allows custom branch policies but lists none, so no branch ` +
+                `can deploy to it. Add at least one pattern in the repo's environment settings.`);
+            return;
+        }
+        // A run started from a tag is checked against the tag patterns only, and one
+        // started from a branch against the branch patterns only. `type` is absent on
+        // older responses, where every entry is a branch.
+        const refType = process.env.GITHUB_REF_TYPE === 'tag' ? 'tag' : 'branch';
+        const names = policies.filter(p => (p.type ?? 'branch') === refType).map(p => p.name);
+        const others = policies.filter(p => (p.type ?? 'branch') !== refType).map(p => p.name);
+        if (names.some(n => this.matches(n, branch))) {
+            core.info(`   environment '${environment}': ${refType} '${branch}' allowed by policy`);
+            return;
+        }
+        throw new ActionYaml_1.ActionsCoreLibError(ErrorCode_1.ErrorCode.DEPLOY_PLAN_COMMAND_FORBIDDEN, `BLOCKED: this run was created from the ${refType} '${branch}', which environment ` +
+            `'${environment}' does not allow to deploy. ` +
+            `Allowed ${names.length === 1 ? refType : refType === 'tag' ? 'tags' : 'branches'}: ` +
+            `${names.length ? names.join(', ') : '(none - this environment deploys from tags only)'}.\n` +
+            (others.length
+                ? `It also allows ${refType === 'tag' ? 'branches' : 'tags'} ${others.join(', ')}, but a run ` +
+                    `started from a ${refType} is never matched against those.\n`
+                : '') +
+            `The policy is checked against the ref the RUN was created from ("Use workflow from"), NOT ` +
+            `the branch/commit input that says what to deploy - re-dispatch from one of the refs above ` +
+            `and keep using the input to pick the commit.\n` +
+            `Without this check GitHub fails the deploy job later with "Branch ${branch} is not allowed to ` +
+            `deploy to ${environment}" and never tells you what is allowed.`);
+    }
+}
+exports.EnvironmentBranchPolicy = EnvironmentBranchPolicy;
+//# sourceMappingURL=EnvironmentBranchPolicy.js.map
 
 /***/ }),
 
@@ -7900,6 +8521,7 @@ const BranchType_1 = __nccwpck_require__(22302);
 const ErrorCode_1 = __nccwpck_require__(9727);
 const PlatformConfigLoader_1 = __nccwpck_require__(87816);
 const ReleaseCut_1 = __nccwpck_require__(69272);
+const EnvironmentBranchPolicy_1 = __nccwpck_require__(83160);
 const STAGE_FLAGS = [
     { output: 'compile_enabled', stageName: StageName_1.StageName.COMPILE },
     { output: 'unit_test_enabled', stageName: StageName_1.StageName.UNIT_TEST },
@@ -8058,6 +8680,15 @@ class OutputWriter {
             ? (useOverride ? envOverride : branchDeployEnv)
             : (deployStage?.deploy?.environment ?? '');
         core.setOutput('deploy_environment', deployEnvironment);
+        // The deploy jobs carry `environment: <deployEnvironment>`, so GitHub checks that
+        // environment's branch policy against the branch this RUN was created from and
+        // kills the job before any step runs - with an error that never says which
+        // branches are allowed. This job has no `environment:`, so it can look the policy
+        // up and say it here, while the operator can still act on it. See
+        // EnvironmentBranchPolicy: it fails open, GitHub remains the actual enforcer.
+        if (phase === 'cd' && deployEnvironment) {
+            await EnvironmentBranchPolicy_1.EnvironmentBranchPolicy.check(deployEnvironment, process.env.GITHUB_REF_NAME ?? '');
+        }
         const deployPolicies = await PlatformConfigLoader_1.PlatformConfigLoader.deployPolicy();
         const policy = deployPolicies[config.type] ?? { teams: [], users: [], min_permission: '' };
         core.setOutput('deploy_approver_teams', policy.teams.join(','));
