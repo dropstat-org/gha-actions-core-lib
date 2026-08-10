@@ -20,10 +20,27 @@ on:
         required: false
         default: '["self-hosted","aws","dropstat"]'
 
+# Every job resolves its runner as `inputs.runner || '["ubuntu-latest"]'`.
+#
+# The `||` fallback ONLY applies when there are no inputs at all - that is, when
+# this file runs as this repo's own CI (push / pull_request / workflow_dispatch).
+# Callers always go through `workflow_call`, where the declared default above
+# gives them the self-hosted labels exactly as before; nothing changes for them.
+#
+# The fallback must NOT be self-hosted, because this repo is PUBLIC and the org's
+# "Default" runner group has allows_public_repositories = false. GitHub therefore
+# never assigns a self-hosted runner to a job here: the job sits queued until the
+# queue timeout expires and the run is marked `cancelled`. Every run of this
+# workflow since it was created died that way, without ever executing a step.
+#
+# Enabling public repos on the runner group is the other way to fix it, and it is
+# the wrong one: it would let a pull request from any fork of this public repo run
+# arbitrary code on the self-hosted runners inside the VPC.
+
 jobs:
   config:
     name: Config
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     outputs:
       compile_enabled:     ${{ steps.ActionsCoreLib.outputs.compile_enabled }}
       unit_test_enabled:   ${{ steps.ActionsCoreLib.outputs.unit_test_enabled }}
@@ -61,7 +78,7 @@ jobs:
     name: Compile
     needs: config
     if: needs.config.outputs.compile_enabled == 'true'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - name: Setup Java
@@ -86,7 +103,7 @@ jobs:
       always() &&
       needs.config.outputs.unit_test_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -100,7 +117,7 @@ jobs:
       always() &&
       needs.config.outputs.linter_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -114,7 +131,7 @@ jobs:
       always() &&
       needs.config.outputs.semgrep_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     permissions:
       contents: read
       security-events: write
@@ -133,7 +150,7 @@ jobs:
       always() &&
       needs.config.outputs.sonarqube_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -150,7 +167,7 @@ jobs:
       always() &&
       needs.config.outputs.trivy_enabled == 'true' &&
       (needs.compile.result == 'success' || needs.compile.result == 'skipped')
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     permissions:
       contents: read
       security-events: write
@@ -164,7 +181,7 @@ jobs:
     name: Checkov
     needs: config
     if: needs.config.outputs.checkov_enabled == 'true'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -182,7 +199,7 @@ jobs:
       needs.linter.result != 'failure' &&
       needs.semgrep.result != 'failure' &&
       needs.trivy.result != 'failure'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     permissions:
       contents: read
       packages: write
@@ -214,7 +231,7 @@ jobs:
       always() &&
       needs.config.outputs.pre_deploy_enabled == 'true' &&
       needs.publish.result != 'failure'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -225,7 +242,7 @@ jobs:
     name: Generic
     needs: config
     if: needs.config.outputs.generic_enabled == 'true'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -238,7 +255,7 @@ jobs:
     name: Plan
     needs: config
     if: needs.config.outputs.plan_enabled == 'true'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     permissions:
       id-token: write
       contents: read
@@ -268,7 +285,7 @@ jobs:
       always() &&
       needs.config.outputs.checkov_tf_enabled == 'true' &&
       needs.plan.result != 'failure'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -290,7 +307,7 @@ jobs:
       needs.config.outputs.deploy_enabled == 'true' &&
       needs.pre_deploy.result != 'failure' &&
       (needs.plan.result == 'success' || needs.plan.result == 'skipped')
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     permissions:
       id-token: write
       contents: read
@@ -327,7 +344,7 @@ jobs:
       always() &&
       needs.config.outputs.post_deploy_enabled == 'true' &&
       needs.deploy.result != 'failure'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: dropstat-org/gha-actions-core-lib@main
@@ -341,7 +358,7 @@ jobs:
       always() &&
       needs.config.outputs.release_enabled == 'true' &&
       needs.deploy.result != 'failure'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     permissions:
       id-token: write
       contents: write
@@ -372,7 +389,7 @@ jobs:
       always() &&
       needs.config.outputs.ecs_deploy_enabled == 'true' &&
       needs.release.result != 'failure'
-    runs-on: ${{ fromJSON(inputs.runner || '["self-hosted","aws","dropstat"]') }}
+    runs-on: ${{ fromJSON(inputs.runner || '["ubuntu-latest"]') }}
     # Environment gate — injects ECS_DEPLOY_ROLE secret for the target env (dev/qa/prod)
     environment: ${{ needs.config.outputs.deploy_environment }}
     permissions:
