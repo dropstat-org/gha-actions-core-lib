@@ -402,15 +402,19 @@ jobs:
     # release/** was added to environmentFor and to the callers' push triggers, but not
     # here, so a release branch built its artifact and then silently skipped its own
     # deploy. Re-adding a branch list here just re-arms that trap.
+    #
+    # config is the job that resolves the branch -> environment routing and runs the
+    # platform-level gates (branch naming among them). It was in `needs` but not in
+    # this condition, and under always() that meant a FAILED config still dispatched
+    # a CD.
+    #
+    # These comments live ABOVE `if:` on purpose. `if: |` is a literal block scalar,
+    # so a `#` INSIDE it is not a YAML comment - it becomes part of the expression
+    # and the workflow dies with startup_failure and zero jobs, which takes down
+    # required-ci in every repo at once. That is exactly what happened on 2026-08-10.
     if: |
       always() &&
       github.event_name == 'push' &&
-      # config is the job that resolves the branch -> environment routing and runs
-      # the platform-level gates (branch naming among them). It was in `needs` but
-      # not in this condition, and under always() that meant a FAILED config still
-      # dispatched a CD: a branch blocked at config was caught only later by the
-      # environment branch policy, and would not have been caught at all had config
-      # failed for a reason the policy does not cover.
       needs.config.result == 'success' &&
       (needs.compile.result  == 'success' || needs.compile.result == 'skipped') &&
       (needs.publish.result  == 'success' || needs.publish.result == 'skipped') &&
