@@ -4215,6 +4215,19 @@ class TriggerCdStage {
             core.info(`${Env_1.Env.refName()} does not deploy from CI - nothing to dispatch.`);
             return;
         }
+        // dev is on demand, never on push (decision D6, 2026-08-27). dev is one shared
+        // environment: with an automatic dispatch, whoever pushed last replaced what a
+        // colleague was looking at - four times in one morning on 2026-08-27. The branch
+        // CI still builds, scans and publishes `sha-<short>`; the developer deploys it by
+        // hand from Actions (Pipeline CD, run from the branch, environment=dev, sha_tag),
+        // which is what the Branching Strategy describes ("its own image to Dev, on
+        // demand, without merging"). develop -> qa and release/* -> uat are unchanged.
+        if (environment === 'dev') {
+            core.info(`${Env_1.Env.refName()} built sha-${(0, ImageSHA_1.shortSHA)(Env_1.Env.sha())}; dev is deployed on demand, not on push. ` +
+                `To try it: Actions > Pipeline CD > Run workflow from this branch with environment=dev ` +
+                `and sha_tag=sha-${(0, ImageSHA_1.shortSHA)(Env_1.Env.sha())}.`);
+            return;
+        }
         const kind = handoffKindFor(config);
         core.info(`${Env_1.Env.refName()} deploys to ${environment}; this repo promotes by ${kind}.`);
         // Naming the sha is only right when this branch built it. On develop/main the push
