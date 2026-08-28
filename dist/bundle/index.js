@@ -4138,6 +4138,7 @@ const Env_1 = __nccwpck_require__(45188);
 const ReleaseCut_1 = __nccwpck_require__(69272);
 const ImageSHA_1 = __nccwpck_require__(2870);
 const EnvironmentBranchPolicy_1 = __nccwpck_require__(83160);
+const CdPushTriggers_1 = __nccwpck_require__(81317);
 /** Environment a pushed branch deploys to, or null when it deploys nowhere. */
 function environmentFor(ref) {
     const branch = ref.replace(/^refs\/heads\//, '');
@@ -4234,6 +4235,19 @@ class TriggerCdStage {
             core.info(`${Env_1.Env.refName()} built sha-${(0, ImageSHA_1.shortSHA)(Env_1.Env.sha())}; dev is deployed on demand, not on push. ` +
                 `To try it: Actions > Pipeline CD > Run workflow from this branch with environment=dev ` +
                 `and sha_tag=sha-${(0, ImageSHA_1.shortSHA)(Env_1.Env.sha())}.`);
+            return;
+        }
+        // The CD may already be starting itself. A push-driven pipeline-cd.yml fires on
+        // develop / release / main by itself, so a CI that also runs on those refs would
+        // dispatch a SECOND deploy of the same image out of one merge. That only became
+        // reachable when the CI started running on the trunk to analyze it: before that,
+        // CI simply never ran there, and the trunk was never analyzed at all - which is
+        // why SonarQube had 88 feature branches and nothing for develop or main.
+        //
+        // Analyzing and deploying are separate concerns; this is the line between them.
+        if (CdPushTriggers_1.CdPushTriggers.firesOnPushFor(Env_1.Env.refName())) {
+            core.info(`${Env_1.Env.refName()} was analyzed here, but its CD starts itself on push - ` +
+                `not dispatching a second one.`);
             return;
         }
         const kind = handoffKindFor(config);
@@ -7039,6 +7053,111 @@ class BranchNameConvention {
 }
 exports.BranchNameConvention = BranchNameConvention;
 //# sourceMappingURL=BranchNameConvention.js.map
+
+/***/ }),
+
+/***/ 81317:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.CdPushTriggers = void 0;
+const core = __importStar(__nccwpck_require__(37484));
+const fs = __importStar(__nccwpck_require__(79896));
+const yaml = __importStar(__nccwpck_require__(74281));
+const CD_WORKFLOW = '.github/workflows/pipeline-cd.yml';
+/**
+ * The branch patterns a repo's own CD workflow already fires on for `push`.
+ *
+ * Two deployment models live side by side in this platform, and they disagree about
+ * who starts the CD:
+ *
+ *   push-driven   - pipeline-cd.yml has `on: push: branches: [develop, release, main]`
+ *                   and starts itself on every merge to an upper branch.
+ *   dispatch-only - pipeline-cd.yml has no push trigger at all, and TriggerCdStage in
+ *                   the CI is the only thing that starts it.
+ *
+ * TriggerCdStage cannot dispatch blindly under both. In a push-driven repo, a CI that
+ * also runs on `develop` would dispatch a second CD alongside the one the push already
+ * started: two deploys of the same image, racing, out of one merge. Reading the CD's
+ * own triggers is what lets one CI serve both models - the repo's workflow file is the
+ * authority on how its CD starts, and it is right there in the checkout.
+ *
+ * A missing or unparseable file means "no push triggers", which keeps the dispatch:
+ * that is the behaviour every repo had before this existed, so a bad read degrades to
+ * the status quo rather than to a silent no-deploy.
+ */
+class CdPushTriggers {
+    /** GitHub workflow globs: a single star stays inside a segment, a double star crosses them. */
+    static matches(pattern, branch) {
+        const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+        const rx = escaped
+            .split('**').join(' ')
+            .split('*').join('[^/]*')
+            .split(' ').join('.*');
+        return new RegExp('^' + rx + '$').test(branch);
+    }
+    static branches(path = CD_WORKFLOW) {
+        try {
+            if (!fs.existsSync(path))
+                return [];
+            const doc = yaml.load(fs.readFileSync(path, 'utf8'));
+            // `on` is the YAML 1.1 boolean true, so js-yaml hands it back under the key
+            // `true`. Reading only 'on' found nothing and silently reported "no push
+            // triggers" for every repo - which would have re-enabled the double dispatch
+            // this class exists to prevent.
+            const on = (doc?.['on'] ?? doc?.[true]);
+            const push = on?.['push'];
+            const branches = push?.['branches'];
+            return Array.isArray(branches) ? branches.map(String) : [];
+        }
+        catch (err) {
+            core.warning(`[CdPushTriggers] Could not read ${path}: ${err.message} - ` +
+                `assuming the CD has no push triggers`);
+            return [];
+        }
+    }
+    /** True when the repo's CD starts itself on a push to this branch. */
+    static firesOnPushFor(branch, path = CD_WORKFLOW) {
+        return this.branches(path).some(p => this.matches(p, branch));
+    }
+}
+exports.CdPushTriggers = CdPushTriggers;
+//# sourceMappingURL=CdPushTriggers.js.map
 
 /***/ }),
 
