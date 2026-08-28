@@ -1940,15 +1940,30 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             // "you can find the results at: ***/dashboard?id=...", i.e. a dashboard link
             // nobody can follow, in every CI log. The token stays masked.
             const sonarUrl = process.env.SONAR_HOST_URL ?? '';
-            // projectKey = artifactId — generado automáticamente desde projectId+serviceId
-            const projectKey = this.config.metadata.artifactId ?? '';
+            // The repo this analysis is running from. Used for both the key and the name.
+            const repo = (process.env.GITHUB_REPOSITORY ?? '').split('/')[1] ?? '';
+            // projectKey = artifactId - generado automaticamente desde projectId+serviceId.
+            //
+            // A *-test-gha mirror is the one case where that is not unique. The test bed is a
+            // byte-for-byte copy of the repo it mirrors, action.yaml included, so it derives
+            // the SAME artifactId - and every analysis run from the test bed landed inside the
+            // official repo's SonarQube project: its branches, its issues, its quality gate.
+            // Verified on 2026-08-27, where gha-dropstat-backend's most recent analysis came
+            // from dropstat-new-backend-test-gha, not from dropstat-new-backend.
+            //
+            // The key is what SonarQube stores history against, so the mirror gets its own.
+            // Suffixing here rather than in the mirror's action.yaml keeps that file a byte-for-
+            // byte copy - which is the whole point of the mirror, and what makes a diff against
+            // the official repo mean something.
+            const artifactId = this.config.metadata.artifactId ?? '';
+            const projectKey = repo.endsWith('-test-gha') ? `${artifactId}-test` : artifactId;
             // The DISPLAY name is the GitHub repo, not the key. The key is ours: it has to be
             // stable and unique across the org, so it stays derived from action.yaml metadata
             // and nothing renames it. The name is what a person reads in the project list, and
             // there `gha-dropstat-backend` is a label nobody can map back to a repo. Sending it
             // on every analysis also means the name self-heals: this SonarQube has no
             // api/projects/update_name, so the scanner is the only thing that can set it.
-            const projectName = (process.env.GITHUB_REPOSITORY ?? '').split('/')[1] ?? '';
+            const projectName = repo;
             // The Java/JVM sensor needs compiled classes (shared from the compile stage
             // via the compile-output artifact). Point sonar.java.binaries at whatever
             // build output is present, so a .java project analyzes without erroring.
