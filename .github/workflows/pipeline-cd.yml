@@ -145,7 +145,7 @@ jobs:
             echo "ref=${{ inputs.deploy_ref }}" >> "$GITHUB_OUTPUT"
           fi
       - id: cfg
-        uses: dropstat-org/gha-actions-core-lib@main
+        uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: config
 
@@ -174,7 +174,7 @@ jobs:
           session-name: GitHubActions-cd-plan
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: plan
 
@@ -196,7 +196,7 @@ jobs:
           # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
           # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
           fetch-depth: 0
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: checkov_tf
 
@@ -218,7 +218,7 @@ jobs:
           # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
           # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
           fetch-depth: 0
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: pre_deploy
 
@@ -501,7 +501,7 @@ jobs:
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: deploy
         env:
@@ -552,7 +552,7 @@ jobs:
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: ecs_deploy
         env:
@@ -623,7 +623,7 @@ jobs:
           terraform-version: ${{ needs.config.outputs.tools_terraform }}
           terragrunt-version: ${{ needs.config.outputs.tools_terragrunt }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: s3_deploy
         env:
@@ -722,7 +722,7 @@ jobs:
           app-id: ${{ secrets.CD_APPROVAL_APP_ID }}
           private-key: ${{ secrets.CD_APPROVAL_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: release
         env:
@@ -758,6 +758,6 @@ jobs:
           # image sha from the merged feature tip (resolveImageSHA -> 2nd parent).
           # depth 1 grafts HEAD as a root and hides parents -> wrong sha (merge commit).
           fetch-depth: 0
-      - uses: dropstat-org/gha-actions-core-lib@main
+      - uses: dropstat-org/gha-actions-core-lib@feature/sonar-mirror-key
         with:
           stage: post_deploy
