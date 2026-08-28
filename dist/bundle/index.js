@@ -1942,6 +1942,13 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             const sonarUrl = process.env.SONAR_HOST_URL ?? '';
             // projectKey = artifactId — generado automáticamente desde projectId+serviceId
             const projectKey = this.config.metadata.artifactId ?? '';
+            // The DISPLAY name is the GitHub repo, not the key. The key is ours: it has to be
+            // stable and unique across the org, so it stays derived from action.yaml metadata
+            // and nothing renames it. The name is what a person reads in the project list, and
+            // there `gha-dropstat-backend` is a label nobody can map back to a repo. Sending it
+            // on every analysis also means the name self-heals: this SonarQube has no
+            // api/projects/update_name, so the scanner is the only thing that can set it.
+            const projectName = (process.env.GITHUB_REPOSITORY ?? '').split('/')[1] ?? '';
             // The Java/JVM sensor needs compiled classes (shared from the compile stage
             // via the compile-output artifact). Point sonar.java.binaries at whatever
             // build output is present, so a .java project analyzes without erroring.
@@ -1953,6 +1960,7 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             const args = [
                 `-Dsonar.projectKey=${projectKey}`,
                 `-Dsonar.sources=.`,
+                projectName ? `-Dsonar.projectName=${projectName}` : '',
                 binDirs.length > 0 ? `-Dsonar.java.binaries=${binDirs.join(',')}` : '',
                 sonarUrl ? `-Dsonar.host.url=${sonarUrl}` : '',
                 sonarToken ? `-Dsonar.token=${sonarToken}` : '',
