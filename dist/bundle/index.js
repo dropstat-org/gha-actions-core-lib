@@ -11938,7 +11938,29 @@ const BUILD_STAGES = [
     { name: StageName_1.StageName.TRIVY, required: false }, // ← scan before push (fail first)
     { name: StageName_1.StageName.PUBLISH, required: false },
 ];
+// The promote path analyzes, it does not rebuild.
+//
+// compile + sonarqube are here so the quality gate finally runs on the code that
+// actually ships. Until this, it never had: SonarQube held 88 analyzed feature branches
+// and `main` with analysisDate null - never analyzed, not once. Everything was measured
+// except what gets deployed.
+//
+// That gap is not just a missing datapoint. A feature branch is analyzed in isolation,
+// so two individually clean features can integrate into a develop that is not clean, and
+// nothing would ever look. And SonarQube's whole "new code" model compares against the
+// main branch, which means it does not work at all while the main branch is empty.
+//
+// compile is not optional here, it is what makes sonarqube useful: without target/classes
+// the Java sensor has nothing to read and sonar.java.binaries resolves to nothing. Adding
+// sonarqube alone would produce a broken scan, not a scan. Frontends do not need it for
+// Sonar and it costs them nothing.
+//
+// publish stays OUT, deliberately. Build-once is intact: develop does not rebuild or
+// republish anything, the image still comes from the feature branch that built it. This
+// compiles only to have something to analyze, and throws the result away.
 const PROMOTE_STAGES = [
+    { name: StageName_1.StageName.COMPILE, required: false },
+    { name: StageName_1.StageName.SONARQUBE, required: false },
     { name: StageName_1.StageName.TRIVY, required: false },
     { name: StageName_1.StageName.RELEASE, required: false },
     { name: StageName_1.StageName.ECS_DEPLOY, required: false },
