@@ -1942,27 +1942,36 @@ class SonarQubeStage extends AbstractAnalyzerStage_1.AbstractAnalyzerStage {
             const sonarUrl = process.env.SONAR_HOST_URL ?? '';
             // The repo this analysis is running from. Used for both the key and the name.
             const repo = (process.env.GITHUB_REPOSITORY ?? '').split('/')[1] ?? '';
-            // projectKey = artifactId - generado automaticamente desde projectId+serviceId.
+            // Key and display name both come from the GitHub repo.
             //
-            // A *-test-gha mirror is the one case where that is not unique. The test bed is a
-            // byte-for-byte copy of the repo it mirrors, action.yaml included, so it derives
-            // the SAME artifactId - and every analysis run from the test bed landed inside the
-            // official repo's SonarQube project: its branches, its issues, its quality gate.
-            // Verified on 2026-08-27, where gha-dropstat-backend's most recent analysis came
-            // from dropstat-new-backend-test-gha, not from dropstat-new-backend.
+            // The key used to be the artifactId (projectId + serviceId from action.yaml). Two
+            // things were wrong with that. It was not unique: a *-test-gha mirror is a byte-for-
+            // byte copy, action.yaml included, so it derived the SAME artifactId and every
+            // analysis from the test bed landed inside the official repo's project - its
+            // branches, its issues, its quality gate. And it was unreadable: `gha-dropstat-
+            // backend` is a label nobody can map back to a repo in the project list.
             //
-            // The key is what SonarQube stores history against, so the mirror gets its own.
-            // Suffixing here rather than in the mirror's action.yaml keeps that file a byte-for-
-            // byte copy - which is the whole point of the mirror, and what makes a diff against
-            // the official repo mean something.
+            // The repo name fixes both at once. It is unique by construction (GitHub enforces
+            // it), it needs no special case for mirrors, and it reads as what it is.
+            //
+            // Changing the key does not rename anything - it points the analysis at a NEW
+            // project, which SonarQube auto-creates. That is deliberate. Verified on
+            // 2026-08-28: this server applies sonar.projectName only when it creates the
+            // project. Job 98751922557 sent -Dsonar.projectName=dropstat-new-backend against
+            // the existing gha-dropstat-backend, the analysis succeeded, and the name did not
+            // change. There is no api/projects/update_name either - the whole API exposes
+            // rename for branches, quality gates and quality profiles, and nothing for a
+            // project's name. Creating the project under the right key is the only lever.
+            //
+            // The old artifactId projects stay behind as orphans and should be deleted by hand
+            // once the new ones have an analysis. They carry no triage worth migrating: all
+            // three had 0 issues and 0 false-positive/wontfix markings when this was written,
+            // because their main branch had never been analyzed at all.
+            //
+            // artifactId remains the fallback for a scanner running outside Actions, where
+            // GITHUB_REPOSITORY is not set.
             const artifactId = this.config.metadata.artifactId ?? '';
-            const projectKey = repo.endsWith('-test-gha') ? `${artifactId}-test` : artifactId;
-            // The DISPLAY name is the GitHub repo, not the key. The key is ours: it has to be
-            // stable and unique across the org, so it stays derived from action.yaml metadata
-            // and nothing renames it. The name is what a person reads in the project list, and
-            // there `gha-dropstat-backend` is a label nobody can map back to a repo. Sending it
-            // on every analysis also means the name self-heals: this SonarQube has no
-            // api/projects/update_name, so the scanner is the only thing that can set it.
+            const projectKey = repo || artifactId;
             const projectName = repo;
             // The Java/JVM sensor needs compiled classes (shared from the compile stage
             // via the compile-output artifact). Point sonar.java.binaries at whatever
